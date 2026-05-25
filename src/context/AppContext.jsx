@@ -30,24 +30,26 @@ async function api(path, method = 'GET', body) {
   return res.json()
 }
 
-export const AppProvider = ({ children }) => {
+export const AppProvider = ({ children, user }) => {
   const [accounts,      setAccounts]      = useState([])
   const [suppliers,     setSuppliers]     = useState([])
   const [savedClients,  setSavedClients]  = useState([])
+  const [users,         setUsers]         = useState([])
   const [toasts,        setToasts]        = useState([])
   const [loading,       setLoading]       = useState(true)
   const [lastAssigned,  setLastAssigned]  = useState(null)
 
   // ── Cargar datos desde la API al montar ────────────────────────────
   useEffect(() => {
-    // Carga principal — no depende de /clients
     Promise.all([api('/accounts'), api('/suppliers')])
       .then(([accs, sups]) => { setAccounts(accs); setSuppliers(sups) })
       .catch(err => console.error('[DB] Error cargando datos:', err))
       .finally(() => setLoading(false))
-    // Clientes guardados — carga independiente, no bloquea nada
     api('/clients').then(c => setSavedClients(c || [])).catch(() => {})
-  }, [])
+    if (user?.role === 'admin') {
+      api('/users').then(u => setUsers(u || [])).catch(() => {})
+    }
+  }, [user?.role])
 
   // ── Toast ──────────────────────────────────────────────────────────
   const showToast = useCallback((message, type = 'success') => {
@@ -253,6 +255,26 @@ export const AppProvider = ({ children }) => {
     showToast('Cliente actualizado en todos sus perfiles ✓', 'success')
   }, [showToast, saveClientToHistory])
 
+  // ── Users CRUD (solo admin) ────────────────────────────────────────
+  const createAppUser = useCallback(async (data) => {
+    const u = await api('/users', 'POST', data)
+    if (u?.id) setUsers(prev => [...prev, u])
+    showToast('Usuario creado', 'success')
+    return u
+  }, [showToast])
+
+  const updateAppUser = useCallback(async (id, data) => {
+    await api(`/users/${id}`, 'PUT', data)
+    setUsers(prev => prev.map(u => u.id === id ? { ...u, ...data } : u))
+    showToast('Usuario actualizado', 'success')
+  }, [showToast])
+
+  const deleteAppUser = useCallback(async (id) => {
+    await api(`/users/${id}`, 'DELETE')
+    setUsers(prev => prev.filter(u => u.id !== id))
+    showToast('Usuario eliminado', 'info')
+  }, [showToast])
+
   // ── Suppliers CRUD ──────────────────────────────────────────────────
   const addSupplier = useCallback(async (data) => {
     try {
@@ -299,6 +321,7 @@ export const AppProvider = ({ children }) => {
   return (
     <AppContext.Provider value={{
       accounts, suppliers, toasts, loading,
+      currentUser: user,
       showToast, dismissToast, copyToClipboard,
       getSubscriptionStatus, getDaysRemaining, getSupplierName,
       addAccount, updateAccount, deleteAccount, markPasswordChanged, setFullAccount,
@@ -308,6 +331,7 @@ export const AppProvider = ({ children }) => {
       extendProfile, extendFullAccountClient, extendAccount, extendClientAllProfiles,
       addSupplier, updateSupplier, deleteSupplier,
       updateClientGlobal, exportToCSV,
+      users, createAppUser, updateAppUser, deleteAppUser,
     }}>
       {children}
     </AppContext.Provider>

@@ -1,7 +1,9 @@
 'use strict'
-const express = require('express')
-const router  = express.Router()
-const db      = require('../db')
+const express          = require('express')
+const bcrypt           = require('bcryptjs')
+const router           = express.Router()
+const db               = require('../db')
+const { adminMiddleware } = require('../auth')
 
 const id = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 
@@ -16,7 +18,12 @@ const plat = (v) => PLATFORMS.includes(v) ? v : 'Otro'
 
 // ── Accounts ─────────────────────────────────────────────────────────
 router.get('/accounts', (req, res) => {
-  res.json(db.getAllAccounts())
+  let accounts = db.getAllAccounts()
+  if (req.user?.role !== 'admin') {
+    const perms = req.user?.permissions || []
+    accounts = accounts.filter(a => perms.includes(a.platform))
+  }
+  res.json(accounts)
 })
 
 router.post('/accounts', (req, res) => {
@@ -140,6 +147,59 @@ router.put('/suppliers/:id', (req, res) => {
 
 router.delete('/suppliers/:id', (req, res) => {
   db.deleteSupplier(req.params.id)
+  res.json({ ok: true })
+})
+
+// ── Users (solo admin) ────────────────────────────────────────────────
+router.get('/users', adminMiddleware, (req, res) => {
+  res.json(db.getAllUsers())
+})
+
+router.post('/users', adminMiddleware, (req, res) => {
+  const b = req.body || {}
+  if (!b.username || !b.password) return res.status(400).json({ error: 'Faltan usuario y contraseña' })
+  const username    = str(b.username, 50).toLowerCase().replace(/\s/g, '')
+  if (!username) return res.status(400).json({ error: 'Usuario inválido' })
+  const role        = b.role === 'admin' ? 'admin' : 'user'
+  const permissions = role === 'admin'
+    ? ['all']
+    : (Array.isArray(b.permissions) ? b.permissions.filter(p => PLATFORMS.includes(p)) : [])
+  const hash   = bcrypt.hashSync(str(b.password, 200), 12)
+  const userId = id()
+  try {
+    db.createUser(userId, username, hash, role, permissions)
+    res.json({ id: userId, username, role, permissions, is_active: true, created_at: new Date().toISOString() })
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'El usuario ya existe' })
+    res.status(500).json({ error: 'Error al crear usuario' })
+  }
+})
+
+router.put('/users/:id', adminMiddleware, (req, res) => {
+  const b       = req.body || {}
+  const updates = {}
+  if (b.role !== undefined) {
+    updates.role        = b.role === 'admin' ? 'admin' : 'user'
+    updates.permissions = updates.role === 'admin'
+      ? ['all']
+      : (Array.isArray(b.permissions) ? b.permissions.filter(p => PLATFORMS.includes(p)) : [])
+  } else if (b.permissions !== undefined) {
+    updates.permissions = Array.isArray(b.permissions) ? b.permissions.filter(p => PLATFORMS.includes(p)) : []
+  }
+  if (b.is_active !== undefined) updates.is_active = bool(b.is_active)
+  if (b.password)                updates.password_hash = bcrypt.hashSync(str(b.password, 200), 12)
+  db.updateUser(req.params.id, updates)
+  res.json({ ok: true })
+})
+
+router.delete('/users/:id', adminMiddleware, (req, res) => {
+  if (req.params.id === req.user.id) return res.status(400).json({ error: 'No puedes eliminar tu propio usuario' })
+  const all = db.getAllUsers()
+  const target = all.find(u => u.id === req.params.id)
+  if (target?.role === 'admin' && all.filter(u => u.role === 'admin' && u.is_active).length <= 1) {
+    return res.status(400).json({ error: 'No puedes eliminar al único administrador activo' })
+  }
+  db.deleteUser(req.params.id)
   res.json({ ok: true })
 })
 

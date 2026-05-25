@@ -76,6 +76,18 @@ db.exec(`
   );
 `)
 
+// ── Migraciones Feature 1: Roles y permisos ───────────────────────────
+try {
+  db.exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+  db.exec("UPDATE users SET role='admin'") // usuarios existentes → admin
+} catch (_) {}
+try { db.exec("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT '[]'") } catch (_) {}
+try { db.exec("ALTER TABLE users ADD COLUMN created_at TEXT DEFAULT (datetime('now'))") } catch (_) {}
+try { db.exec("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1") } catch (_) {}
+try {
+  db.exec(`UPDATE users SET permissions='["all"]' WHERE role='admin' AND (permissions='' OR permissions='[]' OR permissions IS NULL)`)
+} catch (_) {}
+
 // ── Helpers de mapeo (DB → JS) ──────────────────────────────────────
 function mapProfile(p) {
   return {
@@ -330,8 +342,33 @@ function getUserByUsername(username) {
   return db.prepare('SELECT * FROM users WHERE username = ?').get(username)
 }
 
-function createUser(id, username, passwordHash) {
-  db.prepare('INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)').run(id, username, passwordHash)
+function createUser(id, username, passwordHash, role = 'user', permissions = []) {
+  db.prepare('INSERT INTO users (id, username, password_hash, role, permissions) VALUES (?, ?, ?, ?, ?)')
+    .run(id, username, passwordHash, role, JSON.stringify(permissions))
+}
+
+function getAllUsers() {
+  return db.prepare(
+    'SELECT id, username, role, permissions, created_at, is_active FROM users ORDER BY created_at ASC'
+  ).all().map(u => ({
+    ...u,
+    permissions: JSON.parse(u.permissions || '[]'),
+    is_active:   u.is_active !== 0,
+  }))
+}
+
+function updateUser(id, data) {
+  const sets   = []
+  const params = { id }
+  if (data.role         !== undefined) { sets.push('role = @role');                 params.role         = data.role }
+  if (data.permissions  !== undefined) { sets.push('permissions = @permissions');   params.permissions  = JSON.stringify(data.permissions) }
+  if (data.is_active    !== undefined) { sets.push('is_active = @is_active');       params.is_active    = data.is_active ? 1 : 0 }
+  if (data.password_hash !== undefined){ sets.push('password_hash = @password_hash'); params.password_hash = data.password_hash }
+  if (sets.length) db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = @id`).run(params)
+}
+
+function deleteUser(id) {
+  db.prepare('DELETE FROM users WHERE id = ?').run(id)
 }
 
 module.exports = {
@@ -340,6 +377,6 @@ module.exports = {
   updateProfile, updateClientGlobal, extendClientAllProfiles,
   getAllSuppliers, createSupplier, updateSupplier, deleteSupplier,
   getSavedClients, saveClient, deleteClient,
-  getUserByUsername, createUser,
+  getUserByUsername, createUser, getAllUsers, updateUser, deleteUser,
   seedIfEmpty,
 }

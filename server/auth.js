@@ -24,27 +24,36 @@ router.post('/login', loginLimiter, (req, res) => {
 
   const user = db.getUserByUsername(username)
   if (!user) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' })
+  if (user.is_active === 0) return res.status(401).json({ error: 'Usuario desactivado' })
 
   const valid = bcrypt.compareSync(password, user.password_hash)
   if (!valid) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' })
 
+  const role        = user.role        || 'admin'
+  const permissions = JSON.parse(user.permissions || '["all"]')
+
   const token = jwt.sign(
-    { id: user.id, username: user.username },
+    { id: user.id, username: user.username, role, permissions },
     SECRET,
-    { expiresIn: '24h' }          // reducido de 7d a 24h
+    { expiresIn: '24h' }
   )
-  res.json({ token, username: user.username })
+  res.json({ token, username: user.username, role, permissions })
 })
 
 // ── Verify ────────────────────────────────────────────────────────────
 router.get('/verify', authMiddleware, (req, res) => {
-  res.json({ ok: true, username: req.user.username })
+  res.json({
+    ok:          true,
+    username:    req.user.username,
+    role:        req.user.role        || 'admin',
+    permissions: req.user.permissions || ['all'],
+  })
 })
 
 // ── SSE Token (vida corta: 5 min, solo para EventSource) ─────────────
 router.get('/sse-token', authMiddleware, (req, res) => {
   const sseToken = jwt.sign(
-    { id: req.user.id, username: req.user.username, aud: 'sse' },
+    { id: req.user.id, username: req.user.username, role: req.user.role, permissions: req.user.permissions, aud: 'sse' },
     SECRET,
     { expiresIn: '5m' }
   )
@@ -70,4 +79,10 @@ function authMiddleware(req, res, next) {
   }
 }
 
-module.exports = { router, authMiddleware }
+// ── Middleware de admin ────────────────────────────────────────────────
+function adminMiddleware(req, res, next) {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Acceso denegado' })
+  next()
+}
+
+module.exports = { router, authMiddleware, adminMiddleware }

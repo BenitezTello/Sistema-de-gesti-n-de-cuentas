@@ -20,7 +20,7 @@ export default function Login({ onLogin }) {
       const data = await res.json()
       if (!res.ok) { setError(data.error || 'Error al iniciar sesión'); return }
       localStorage.setItem('token', data.token)
-      onLogin(data.username)
+      onLogin({ username: data.username, role: data.role || 'admin', permissions: data.permissions || ['all'] })
     } catch {
       setError('Error de conexión')
     } finally {

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import Login from './components/Login'
-import { LayoutDashboard, Tv, MonitorPlay, MessageSquare, Truck, Users, Menu, X, LogOut, Bell } from 'lucide-react'
+import { LayoutDashboard, Tv, MonitorPlay, MessageSquare, Truck, Users, UserCog, Shield, Menu, X, LogOut, Bell } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { AppProvider, useApp } from './context/AppContext'
@@ -10,24 +10,27 @@ import AccountsListView from './components/AccountsListView'
 import WhatsAppView from './components/WhatsAppView'
 import SuppliersView from './components/SuppliersView'
 import ClientsView from './components/ClientsView'
+import UsersView from './components/UsersView'
 import ToastContainer from './components/Toast'
 
-const NAV = [
-  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { id: 'accounts', icon: MonitorPlay, label: 'Ventas' },
-  { id: 'accounts-list', icon: Tv, label: 'Cuentas' },
-  { id: 'clients', icon: Users, label: 'Clientes' },
-  { id: 'whatsapp', icon: MessageSquare, label: 'Cobros WA' },
-  { id: 'suppliers', icon: Truck, label: 'Proveedores' },
+const BASE_NAV = [
+  { id: 'dashboard',     icon: LayoutDashboard, label: 'Dashboard',  adminOnly: false },
+  { id: 'accounts',      icon: MonitorPlay,      label: 'Ventas',     adminOnly: false },
+  { id: 'accounts-list', icon: Tv,               label: 'Cuentas',    adminOnly: false },
+  { id: 'clients',       icon: Users,            label: 'Clientes',   adminOnly: false },
+  { id: 'whatsapp',      icon: MessageSquare,    label: 'Cobros WA',  adminOnly: false },
+  { id: 'suppliers',     icon: Truck,            label: 'Proveedores',adminOnly: true  },
+  { id: 'users',         icon: UserCog,          label: 'Usuarios',   adminOnly: true  },
 ]
 
 const PAGE_TITLES = {
-  dashboard: { title: 'Dashboard' },
-  accounts: { title: 'Ventas' },
+  dashboard:       { title: 'Dashboard' },
+  accounts:        { title: 'Ventas' },
   'accounts-list': { title: 'Cuentas' },
-  clients: { title: 'Clientes' },
-  whatsapp: { title: 'Cobros WA' },
-  suppliers: { title: 'Proveedores' },
+  clients:         { title: 'Clientes' },
+  whatsapp:        { title: 'Cobros WA' },
+  suppliers:       { title: 'Proveedores' },
+  users:           { title: 'Usuarios' },
 }
 
 function TopBar({ activeTab, onNavigate, onMenuOpen }) {
@@ -72,9 +75,11 @@ function TopBar({ activeTab, onNavigate, onMenuOpen }) {
   )
 }
 
-function AppShell({ onLogout }) {
+function AppShell({ user, onLogout }) {
   const [activeTab, setActiveTab] = useState('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const isAdmin = user?.role === 'admin'
+  const NAV = BASE_NAV.filter(item => !item.adminOnly || isAdmin)
 
   const navigate = (tab) => { setActiveTab(tab); setSidebarOpen(false) }
 
@@ -120,7 +125,22 @@ function AppShell({ onLogout }) {
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-white/[0.05] pt-3">
+        <div className="border-t border-white/[0.05] pt-3 flex flex-col gap-1">
+          {/* Usuario actual */}
+          <div className="px-3 py-2 flex items-center gap-2">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
+              style={{ background: isAdmin ? 'rgba(168,85,247,0.2)' : 'rgba(59,130,246,0.2)' }}>
+              {isAdmin
+                ? <Shield size={12} style={{ color: '#d8b4fe' }} />
+                : <UserCog size={12} style={{ color: '#93c5fd' }} />}
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-slate-300 truncate">{user?.username}</p>
+              <p className="text-[10px]" style={{ color: isAdmin ? '#d8b4fe' : '#93c5fd' }}>
+                {isAdmin ? 'Administrador' : 'Usuario'}
+              </p>
+            </div>
+          </div>
           <button className="sidebar-item w-full" style={{ color: '#475569' }} onClick={onLogout}>
             <LogOut size={16} />
             <span>Cerrar sesión</span>
@@ -134,12 +154,13 @@ function AppShell({ onLogout }) {
 
         <main className="flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-7">
           <div className="max-w-6xl mx-auto">
-            {activeTab === 'dashboard' && <Dashboard onNavigate={navigate} />}
-            {activeTab === 'accounts' && <AccountsView />}
+            {activeTab === 'dashboard'     && <Dashboard onNavigate={navigate} />}
+            {activeTab === 'accounts'      && <AccountsView />}
             {activeTab === 'accounts-list' && <AccountsListView />}
-            {activeTab === 'clients' && <ClientsView />}
-            {activeTab === 'whatsapp' && <WhatsAppView />}
-            {activeTab === 'suppliers' && <SuppliersView />}
+            {activeTab === 'clients'       && <ClientsView />}
+            {activeTab === 'whatsapp'      && <WhatsAppView />}
+            {activeTab === 'suppliers'     && isAdmin && <SuppliersView />}
+            {activeTab === 'users'         && isAdmin && <UsersView />}
           </div>
         </main>
       </div>
@@ -158,7 +179,13 @@ export default function App() {
     if (!token) { setAuthChecked(true); return }
     fetch('/api/auth/verify', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
-      .then(d => { if (d.ok) setAuthUser(d.username) })
+      .then(d => {
+        if (d.ok) setAuthUser({
+          username:    d.username,
+          role:        d.role        || 'admin',
+          permissions: d.permissions || ['all'],
+        })
+      })
       .catch(() => { })
       .finally(() => setAuthChecked(true))
   }, [])
@@ -167,8 +194,8 @@ export default function App() {
   if (!authUser) return <Login onLogin={setAuthUser} />
 
   return (
-    <AppProvider>
-      <AppShell onLogout={() => { localStorage.removeItem('token'); setAuthUser(null) }} />
+    <AppProvider user={authUser}>
+      <AppShell user={authUser} onLogout={() => { localStorage.removeItem('token'); setAuthUser(null) }} />
     </AppProvider>
   )
 }
