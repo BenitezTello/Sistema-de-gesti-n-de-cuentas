@@ -85,4 +85,8 @@ function adminMiddleware(req, res, next) {
   next()
 }
 
-module.exports = { router, authMiddleware, adminMiddleware }
+function hashPassword(password) {
+  return bcrypt.hashSync(password, 12)
+}
+
+module.exports = { router, authMiddleware, adminMiddleware, hashPassword }

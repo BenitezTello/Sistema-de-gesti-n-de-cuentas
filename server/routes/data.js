@@ -1,9 +1,8 @@
 'use strict'
-const express          = require('express')
-const bcrypt           = require('bcryptjs')
-const router           = express.Router()
-const db               = require('../db')
-const { adminMiddleware } = require('../auth')
+const express                        = require('express')
+const router                         = express.Router()
+const db                             = require('../db')
+const { adminMiddleware, hashPassword } = require('../auth')
 
 const id = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 
@@ -164,7 +163,7 @@ router.post('/users', adminMiddleware, (req, res) => {
   const permissions = role === 'admin'
     ? ['all']
     : (Array.isArray(b.permissions) ? b.permissions.filter(p => PLATFORMS.includes(p)) : [])
-  const hash   = bcrypt.hashSync(str(b.password, 200), 12)
+  const hash   = hashPassword(str(b.password, 200))
   const userId = id()
   try {
     db.createUser(userId, username, hash, role, permissions)
@@ -187,7 +186,7 @@ router.put('/users/:id', adminMiddleware, (req, res) => {
     updates.permissions = Array.isArray(b.permissions) ? b.permissions.filter(p => PLATFORMS.includes(p)) : []
   }
   if (b.is_active !== undefined) updates.is_active = bool(b.is_active)
-  if (b.password)                updates.password_hash = bcrypt.hashSync(str(b.password, 200), 12)
+  if (b.password)                updates.password_hash = hashPassword(str(b.password, 200))
   db.updateUser(req.params.id, updates)
   res.json({ ok: true })
 })
