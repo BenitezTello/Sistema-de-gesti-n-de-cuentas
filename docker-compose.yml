@@ -1,0 +1,48 @@
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streammanager-app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - WA_HOST=wa
+      - WA_PORT=3001
+      - JWT_SECRET=REPLACED
+      - ENCRYPTION_KEY=REPLACED
+    volumes:
+      - db_data:/app/server/data
+    depends_on:
+      - wa
+    restart: unless-stopped
+    networks:
+      - stream-net
+
+  wa:
+    build:
+      context: .
+      dockerfile: Dockerfile.wa
+    container_name: streammanager-wa
+    expose:
+      - "3001"
+    environment:
+      - PORT=3001
+      # Sin PUPPETEER_EXECUTABLE_PATH → usa el Chrome bundled de puppeteer
+    volumes:
+      - wa_session:/app/server/.wwebjs_auth
+    restart: unless-stopped
+    shm_size: '1gb'
+    networks:
+      - stream-net
+
+volumes:
+  db_data:
+  wa_session:
+
+networks:
+  stream-net:
+    driver: bridge

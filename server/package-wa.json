@@ -1,0 +1,12 @@
+{
+  "name": "streammanager-wa",
+  "version": "1.0.0",
+  "main": "wa.js",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer": "^22.0.0",
+    "qrcode": "^1.5.3",
+    "whatsapp-web.js": "^1.26.1"
+  }
+}

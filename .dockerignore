@@ -1,0 +1,9 @@
+node_modules
+server/node_modules
+server/.wwebjs_auth
+server/data
+dist
+.git
+.gitignore
+README.md
+npm-debug.log
