@@ -1,19 +1,22 @@
 import { useState, useMemo, useEffect } from 'react'
 import Pagination from './Pagination'
-import { motion } from 'framer-motion'
-import { addMonths, addDays, format } from 'date-fns'
+import { motion, AnimatePresence } from 'framer-motion'
+import { addMonths, addDays, format, differenceInCalendarDays } from 'date-fns'
 import {
-  Search, Edit2, Save, X, User,
-  MessageSquare, RefreshCw, Layers, Trash2
+  Search, Edit2, Save, X, MessageSquare, RefreshCw,
+  Layers, Trash2, BarChart2, Users, TrendingUp,
+  AlertTriangle, UserMinus, Star, Calendar,
 } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import { createPortal } from 'react-dom'
-import { motion as m, AnimatePresence } from 'framer-motion'
 
-/* ── Helpers ─────────────────────────────────────────────────────────  */
 const PLATFORM_CLASS = {
   'Netflix':'plat-netflix','Disney+':'plat-disney','HBO Max':'plat-hbo',
   'Prime Video':'plat-prime','Crunchyroll':'plat-crunchyroll','Movistar+':'plat-movistar',
+}
+const PLATFORM_COLOR = {
+  'Netflix':'#e50914','Disney+':'#006e99','HBO Max':'#7b2fbe',
+  'Prime Video':'#00a8e1','Crunchyroll':'#f47521','Movistar+':'#019df4',
 }
 const STATUS_CFG = {
   expired:  { badge:'badge-expired',  dot:'#f87171' },
@@ -24,32 +27,31 @@ const STATUS_CFG = {
 }
 
 function normalizePhone(p) { return p?.replace(/\D/g,'') || '' }
-
-// Elimina caracteres invisibles y normaliza para comparación
 function cleanStr(s) {
   if (!s) return ''
   let r = ''
   for (const ch of s) {
     const c = ch.charCodeAt(0)
-    // Conserva ASCII imprimible (32-126) y Latin Extended (160-591)
     if ((c >= 32 && c <= 126) || (c >= 160 && c <= 591)) r += ch
   }
   return r.toLowerCase().trim()
 }
 
-/* ── Deduplication ───────────────────────────────────────────────────── */
+async function apiFetch(path) {
+  const token = localStorage.getItem('token')
+  const res = await fetch(`/api/data${path}`, { headers: { Authorization: `Bearer ${token}` } })
+  if (!res.ok) throw new Error(res.status)
+  return res.json()
+}
+
+// ── Build unique client list ──────────────────────────────────────────
 function buildUniqueClients(accounts, savedClients, getSubscriptionStatus) {
   const map = new Map()
-
-  // 1. Clientes guardados (historial sin suscripción activa)
   ;(savedClients || []).forEach(c => {
     const key = normalizePhone(c.phone) || c.name.toLowerCase().trim()
     if (!map.has(key)) map.set(key, { id: key, name: c.name, phone: c.phone || '', subs: [] })
   })
-
-  // 2. Fusionar con clientes de perfiles activos
   accounts.forEach(acc => {
-    // Perfiles normales
     acc.profiles.forEach(p => {
       if (!p.clientName) return
       const key = normalizePhone(p.phone) || p.clientName.toLowerCase().trim()
@@ -57,18 +59,13 @@ function buildUniqueClients(accounts, savedClients, getSubscriptionStatus) {
       const client = map.get(key)
       if (p.clientName && client.name !== p.clientName) client.name = p.clientName
       client.subs.push({
-        accountId:  acc.id,
-        profileId:  p.id,
-        platform:   acc.platform,
-        expiryDate: p.expiryDate,
-        pin:        p.pin,
-        number:     p.number,
-        status:     getSubscriptionStatus(p.expiryDate),
-        isDown:     !!acc.isDown,
+        accountId: acc.id, profileId: p.id,
+        platform: acc.platform, expiryDate: p.expiryDate,
+        pin: p.pin, number: p.number,
+        status: getSubscriptionStatus(p.expiryDate),
+        isDown: !!acc.isDown,
       })
     })
-
-    // Clientes de cuentas completas
     if (acc.isFullAccount && acc.fullClient?.clientName) {
       const fc  = acc.fullClient
       const key = normalizePhone(fc.phone) || fc.clientName.toLowerCase().trim()
@@ -76,19 +73,14 @@ function buildUniqueClients(accounts, savedClients, getSubscriptionStatus) {
       const client = map.get(key)
       if (fc.clientName && client.name !== fc.clientName) client.name = fc.clientName
       client.subs.push({
-        accountId:  acc.id,
-        profileId:  null,
-        platform:   acc.platform,
-        expiryDate: fc.expiryDate || '',
-        pin:        '',
-        number:     null,
-        status:     getSubscriptionStatus(fc.expiryDate),
-        isDown:     !!acc.isDown,
-        isFullAccount: true,
+        accountId: acc.id, profileId: null,
+        platform: acc.platform, expiryDate: fc.expiryDate || '',
+        pin: '', number: null,
+        status: getSubscriptionStatus(fc.expiryDate),
+        isDown: !!acc.isDown, isFullAccount: true,
       })
     }
   })
-
   return Array.from(map.values()).map(c => ({
     ...c,
     isFromDownAccount: c.subs.some(s => s.isDown),
@@ -100,21 +92,308 @@ function buildUniqueClients(accounts, savedClients, getSubscriptionStatus) {
   }))
 }
 
-/* ── Edit client modal ─────────────────────────────────────────────── */
+// ── Bar mini chart ────────────────────────────────────────────────────
+function MiniBar({ value, max, color = '#4ade80', height = 8 }) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0
+  return (
+    <div className="flex-1 rounded-full overflow-hidden" style={{ height, background: 'rgba(255,255,255,0.06)' }}>
+      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
+    </div>
+  )
+}
+
+// ── Analytics section ─────────────────────────────────────────────────
+function ClientAnalytics({ accounts, allClients }) {
+  const { getSubscriptionStatus } = useApp()
+  const [analytics, setAnalytics] = useState(null)
+
+  useEffect(() => {
+    apiFetch('/clients/analytics').then(setAnalytics).catch(() => {})
+  }, [])
+
+  const now = new Date(); now.setHours(0,0,0,0)
+
+  // Métricas de perfiles
+  const allOccupied = accounts.flatMap(a => a.profiles.filter(p => p.clientName))
+  const statuses    = allOccupied.map(p => getSubscriptionStatus(p.expiryDate))
+  const activeCount = statuses.filter(s => ['active','soon','today'].includes(s)).length
+  const soonCount   = statuses.filter(s => ['today','soon'].includes(s)).length
+  const expiredCount= statuses.filter(s => s === 'expired').length
+
+  // Distribución por plataforma
+  const byPlatform = {}
+  accounts.forEach(acc => {
+    const occ = acc.profiles.filter(p => p.clientName).length
+    if (occ > 0) byPlatform[acc.platform] = (byPlatform[acc.platform] || 0) + occ
+  })
+  const platEntries = Object.entries(byPlatform).sort((a,b) => b[1]-a[1])
+  const maxPlat     = Math.max(...platEntries.map(e => e[1]), 1)
+
+  // Clientes en riesgo (vencen hoy o en ≤2 días)
+  const atRisk = accounts.flatMap(acc =>
+    acc.profiles
+      .filter(p => p.clientName && ['today','soon'].includes(getSubscriptionStatus(p.expiryDate)))
+      .map(p => ({ ...p, platform: acc.platform }))
+  ).sort((a,b) => (a.expiryDate||'').localeCompare(b.expiryDate||''))
+
+  // Cancelaciones estimadas (vencidos >5 días sin renovar)
+  const lost = accounts.flatMap(acc =>
+    acc.profiles.filter(p => {
+      if (!p.clientName || !p.expiryDate) return false
+      const [y,m,d] = p.expiryDate.split('-').map(Number)
+      const exp = new Date(y, m-1, d)
+      return Math.round((now - exp) / 86400000) > 5
+    }).map(p => ({ ...p, platform: acc.platform }))
+  ).sort((a,b) => (a.expiryDate||'').localeCompare(b.expiryDate||''))
+
+  // Chart helpers
+  const wdMax   = analytics ? Math.max(...analytics.byWeekday.map(d => d.count), 1) : 1
+  const mnMax   = analytics ? Math.max(...analytics.monthlyNew.map(d => d.count), 1) : 1
+  const WD_COLORS = ['#60a5fa','#4ade80','#4ade80','#4ade80','#4ade80','#4ade80','#a78bfa']
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Tarjetas resumen ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label:'Clientes activos',     value: activeCount,                    color:'#4ade80', icon: Users },
+          { label:'Nuevos este mes',       value: analytics?.newThisMonth ?? '…', color:'#60a5fa', icon: TrendingUp },
+          { label:'Por vencer (≤2 días)',  value: soonCount,                      color:'#fbbf24', icon: AlertTriangle },
+          { label:'Cancelaciones est.',    value: expiredCount,                   color:'#f87171', icon: UserMinus },
+        ].map(({ label, value, color, icon: Icon }, i) => (
+          <motion.div key={label}
+            initial={{ opacity:0, y:12 }} animate={{ opacity:1, y:0 }}
+            transition={{ delay: i * 0.06 }}
+            className="rounded-2xl p-4"
+            style={{ background:'rgba(11,20,12,0.88)', border:`1px solid ${color}25`, borderLeft:`3px solid ${color}` }}>
+            <div className="flex items-center gap-2 mb-1.5">
+              <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                style={{ background:`${color}18`, color }}>
+                <Icon size={14}/>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-tight">{label}</p>
+            </div>
+            <p className="text-2xl font-bold" style={{ color }}>{value}</p>
+          </motion.div>
+        ))}
+      </div>
+
+      {/* ── Fila de gráficos ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+        {/* Día de más compras */}
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.2 }}
+          className="glass-card">
+          <div className="flex items-center gap-2 mb-4">
+            <Calendar size={15} style={{ color:'#60a5fa' }}/>
+            <h3 className="font-bold text-slate-200 text-sm">Día de más compras</h3>
+          </div>
+          {analytics ? (
+            <div className="space-y-2.5">
+              {analytics.byWeekday.map(({ day, count }, i) => (
+                <div key={day} className="flex items-center gap-2.5">
+                  <span className="text-xs text-slate-500 w-7 flex-shrink-0">{day}</span>
+                  <MiniBar value={count} max={wdMax} color={WD_COLORS[i]} />
+                  <span className="text-xs font-mono text-slate-400 w-8 text-right flex-shrink-0">{count}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-24 text-slate-600 text-xs">Cargando…</div>
+          )}
+        </motion.div>
+
+        {/* Distribución por plataforma */}
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.25 }}
+          className="glass-card">
+          <div className="flex items-center gap-2 mb-4">
+            <BarChart2 size={15} style={{ color:'#a78bfa' }}/>
+            <h3 className="font-bold text-slate-200 text-sm">Clientes por plataforma</h3>
+          </div>
+          <div className="space-y-2.5">
+            {platEntries.map(([plat, count]) => {
+              const color = PLATFORM_COLOR[plat] || '#60a5fa'
+              const pct   = Math.round(count / allOccupied.length * 100)
+              return (
+                <div key={plat} className="flex items-center gap-2.5">
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${PLATFORM_CLASS[plat]||''}`}
+                    style={{ minWidth: '5rem', textAlign:'center' }}>
+                    {plat}
+                  </span>
+                  <MiniBar value={count} max={maxPlat} color={color} />
+                  <span className="text-xs font-mono text-slate-400 w-14 text-right flex-shrink-0">
+                    {count} <span className="text-slate-600">({pct}%)</span>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </motion.div>
+      </div>
+
+      {/* ── Nuevos clientes por mes ── */}
+      {analytics && (
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.3 }}
+          className="glass-card">
+          <div className="flex items-center gap-2 mb-4">
+            <TrendingUp size={15} style={{ color:'#4ade80' }}/>
+            <h3 className="font-bold text-slate-200 text-sm">Nuevos clientes por mes</h3>
+          </div>
+          <div className="flex items-end gap-2 h-28">
+            {analytics.monthlyNew.map(({ label, count }, i) => {
+              const pct = mnMax > 0 ? Math.round((count / mnMax) * 100) : 0
+              const isLast = i === analytics.monthlyNew.length - 1
+              return (
+                <div key={label} className="flex-1 flex flex-col items-center gap-1">
+                  <span className="text-[10px] font-mono text-slate-400">{count}</span>
+                  <div className="w-full rounded-t-md transition-all duration-700 flex-shrink-0"
+                    style={{
+                      height: `${Math.max(pct, 4)}%`,
+                      background: isLast
+                        ? 'linear-gradient(180deg,#4ade80,#22c55e)'
+                        : 'rgba(74,222,128,0.35)',
+                      border: isLast ? '1px solid #4ade8060' : 'none',
+                    }}/>
+                  <span className="text-[10px] text-slate-600">{label}</span>
+                </div>
+              )
+            })}
+          </div>
+        </motion.div>
+      )}
+
+      {/* ── Tablas: En riesgo + Cancelaciones ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+        {/* En riesgo */}
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.35 }}
+          className="glass-card !p-0 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-white/[0.05]">
+            <AlertTriangle size={14} style={{ color:'#fbbf24' }}/>
+            <h3 className="font-bold text-slate-200 text-sm">Por vencer ({atRisk.length})</h3>
+          </div>
+          <div className="divide-y divide-white/[0.04] max-h-56 overflow-y-auto">
+            {atRisk.length === 0 && (
+              <p className="text-center py-8 text-slate-600 text-xs">Sin clientes por vencer</p>
+            )}
+            {atRisk.map(p => {
+              const days = differenceInCalendarDays(
+                new Date(...p.expiryDate.split('-').map(Number).map((v,i)=>i===1?v-1:v)),
+                new Date()
+              )
+              return (
+                <div key={p.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02]">
+                  <div>
+                    <p className="text-sm font-medium text-slate-200">{p.clientName}</p>
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${PLATFORM_CLASS[p.platform]||''}`}>
+                      {p.platform}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs font-mono" style={{ color: days <= 0 ? '#fbbf24' : '#facc15' }}>
+                      {days === 0 ? 'Hoy' : days < 0 ? `Hace ${Math.abs(days)}d` : `en ${days}d`}
+                    </p>
+                    <p className="text-[10px] text-slate-600">{p.expiryDate}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </motion.div>
+
+        {/* Cancelaciones estimadas */}
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.4 }}
+          className="glass-card !p-0 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-white/[0.05]">
+            <UserMinus size={14} style={{ color:'#f87171' }}/>
+            <h3 className="font-bold text-slate-200 text-sm">Cancelaciones est. ({lost.length})</h3>
+          </div>
+          <div className="divide-y divide-white/[0.04] max-h-56 overflow-y-auto">
+            {lost.length === 0 && (
+              <p className="text-center py-8 text-slate-600 text-xs">Sin cancelaciones</p>
+            )}
+            {lost.map(p => {
+              const days = Math.abs(differenceInCalendarDays(
+                new Date(...p.expiryDate.split('-').map(Number).map((v,i)=>i===1?v-1:v)),
+                new Date()
+              ))
+              return (
+                <div key={p.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02]">
+                  <div>
+                    <p className="text-sm font-medium text-slate-200">{p.clientName}</p>
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${PLATFORM_CLASS[p.platform]||''}`}>
+                      {p.platform}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs font-mono text-red-400">Hace {days}d</p>
+                    <p className="text-[10px] text-slate-600">{p.expiryDate}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </motion.div>
+      </div>
+
+      {/* ── Top clientes ── */}
+      {analytics?.topClients?.length > 0 && (
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.45 }}
+          className="glass-card !p-0 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-white/[0.05]">
+            <Star size={14} style={{ color:'#fbbf24' }}/>
+            <h3 className="font-bold text-slate-200 text-sm">Top clientes</h3>
+          </div>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th style={{ width:'2rem' }}>#</th>
+                  <th>Cliente</th>
+                  <th>Celular</th>
+                  <th className="text-right">Renovaciones</th>
+                  <th className="text-right">Total S/.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics.topClients.map((c, i) => (
+                  <tr key={c.name}>
+                    <td>
+                      <span className="text-xs font-bold"
+                        style={{ color: i === 0 ? '#fbbf24' : i === 1 ? '#94a3b8' : i === 2 ? '#cd7f32' : '#475569' }}>
+                        {i + 1}
+                      </span>
+                    </td>
+                    <td><p className="font-medium text-slate-200 text-sm">{c.name}</p></td>
+                    <td><span className="text-xs font-mono text-slate-500">{c.phone || '—'}</span></td>
+                    <td className="text-right">
+                      <span className="text-sm font-bold text-emerald-400">{c.tx_count}</span>
+                    </td>
+                    <td className="text-right">
+                      <span className="text-sm font-mono text-slate-300">S/ {Number(c.total).toFixed(2)}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </motion.div>
+      )}
+    </div>
+  )
+}
+
+// ── Edit client modal ──────────────────────────────────────────────────
 function EditClientModal({ client, onSave, onClose }) {
   const [name,  setName]  = useState(client.name)
   const [phone, setPhone] = useState(client.phone)
-
-  const handleSubmit = (e) => {
-    e.preventDefault()
-    onSave(name.trim(), phone.trim())
-  }
-
+  const handleSubmit = (e) => { e.preventDefault(); onSave(name.trim(), phone.trim()) }
   return createPortal(
     <AnimatePresence>
-      <m.div className="modal-backdrop"
+      <motion.div className="modal-backdrop"
         initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}>
-        <m.div className="modal-box"
+        <motion.div className="modal-box"
           initial={{scale:0.95,y:16}} animate={{scale:1,y:0}} exit={{scale:0.95,y:16}}>
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-bold text-slate-100">Editar cliente</h3>
@@ -134,40 +413,35 @@ function EditClientModal({ client, onSave, onClose }) {
               <button type="button" className="btn-secondary" onClick={onClose}><X size={14}/></button>
             </div>
           </form>
-        </m.div>
-      </m.div>
+        </motion.div>
+      </motion.div>
     </AnimatePresence>,
     document.body
   )
 }
 
-/* ── Renew button ───────────────────────────────────────────────────── */
+// ── Renew button ──────────────────────────────────────────────────────
 function RenewButton({ client }) {
   const { extendClientAllProfiles } = useApp()
   const [open,   setOpen]   = useState(false)
   const [custom, setCustom] = useState('')
-
   const baseDate = useMemo(() => {
     const dates = client.subs.map(s => s.expiryDate).filter(Boolean).sort()
     if (!dates.length) return format(new Date(), 'yyyy-MM-dd')
     return dates[0]
   }, [client.subs])
-
   function parseLocal(d) { const [y,m,dd] = d.split('-').map(Number); return new Date(y,m-1,dd) }
   function toShort(iso)  { const [y,mo,d] = iso.split('-'); return `${parseInt(d)}/${parseInt(mo)}/${y.slice(2)}` }
-
   const OPTS = [
     { label:'+15 días', fn: b => addDays(b,15)  },
     { label:'+1 mes',   fn: b => addMonths(b,1) },
     { label:'+2 meses', fn: b => addMonths(b,2) },
     { label:'+3 meses', fn: b => addMonths(b,3) },
   ]
-
   const apply = (newDate, label) => {
     extendClientAllProfiles(client.phone, client.name, format(newDate,'yyyy-MM-dd'), label)
     setOpen(false); setCustom('')
   }
-
   return (
     <div className="relative">
       <button className="btn-icon btn-icon-success" title="Actualizar membresía" onClick={() => setOpen(v=>!v)}>
@@ -177,7 +451,7 @@ function RenewButton({ client }) {
         {open && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpen(false)}/>
-            <m.div initial={{opacity:0,scale:0.9,y:-4}} animate={{opacity:1,scale:1,y:0}}
+            <motion.div initial={{opacity:0,scale:0.9,y:-4}} animate={{opacity:1,scale:1,y:0}}
               exit={{opacity:0,scale:0.9}} transition={{duration:0.15}}
               className="absolute right-0 top-9 z-50 min-w-[200px] rounded-xl border border-white/10 shadow-2xl overflow-hidden"
               style={{background:'#111827'}}>
@@ -208,7 +482,7 @@ function RenewButton({ client }) {
                     disabled={!custom}>✓</button>
                 </div>
               </div>
-            </m.div>
+            </motion.div>
           </>
         )}
       </AnimatePresence>
@@ -216,33 +490,25 @@ function RenewButton({ client }) {
   )
 }
 
-/* ── Client row ────────────────────────────────────────────────────── */
+// ── Client row ─────────────────────────────────────────────────────────
 function ClientRow({ client, idx, onEdit, onDelete }) {
-  const cfg     = STATUS_CFG[client.worstStatus] || STATUS_CFG.active
-  const waPhone = normalizePhone(client.phone)
-  // COMBO = tiene suscripciones de DISTINTAS plataformas
-  const uniquePlatforms = [...new Set(client.subs.map(s => s.platform))]
-  const isCombo = uniquePlatforms.length > 1
-
-  // Agrupar subs por plataforma para mostrar conteo
-  const subsByPlat = {}
+  const cfg              = STATUS_CFG[client.worstStatus] || STATUS_CFG.active
+  const waPhone          = normalizePhone(client.phone)
+  const uniquePlatforms  = [...new Set(client.subs.map(s => s.platform))]
+  const isCombo          = uniquePlatforms.length > 1
+  const subsByPlat       = {}
   client.subs.forEach(s => {
     if (!subsByPlat[s.platform]) subsByPlat[s.platform] = []
     subsByPlat[s.platform].push(s)
   })
-  // Peor estado por plataforma
   const worstByPlat = (subs) => subs.reduce((w, s) => {
     const o = { expired:0, today:1, soon:2, active:3, available:4 }
     return (o[s.status]??9) < (o[w]??9) ? s.status : w
   }, 'active')
-
   const buildComboMsg = () => {
     const lines = client.subs.map(s => `🎬 *${s.platform}* → vence: ${s.expiryDate}`)
-    return encodeURIComponent(
-      `Hola *${client.name}*! 👋 Tus suscripciones:\n\n${lines.join('\n')}\n\n¡Que los disfrutes! 😊`
-    )
+    return encodeURIComponent(`Hola *${client.name}*! 👋 Tus suscripciones:\n\n${lines.join('\n')}\n\n¡Que los disfrutes! 😊`)
   }
-
   return (
     <motion.tr initial={{opacity:0}} animate={{opacity:1}} transition={{delay:Math.min(idx*0.015,0.4)}}>
       <td style={{width:'2rem'}}>
@@ -265,9 +531,7 @@ function ClientRow({ client, idx, onEdit, onDelete }) {
           )}
         </div>
       </td>
-      <td>
-        <span className="text-xs font-mono text-slate-400">{client.phone || '—'}</span>
-      </td>
+      <td><span className="text-xs font-mono text-slate-400">{client.phone || '—'}</span></td>
       <td>
         <div className="flex flex-wrap gap-1">
           {Object.entries(subsByPlat).map(([plat, subs]) => {
@@ -289,12 +553,8 @@ function ClientRow({ client, idx, onEdit, onDelete }) {
       <td>
         <div className="flex items-center justify-end gap-1">
           <RenewButton client={client}/>
-          <button className="btn-icon btn-icon-indigo" title="Editar cliente" onClick={() => onEdit(client)}>
-            <Edit2 size={14}/>
-          </button>
-          <button className="btn-icon btn-icon-danger" title="Eliminar del historial" onClick={() => onDelete(client)}>
-            <Trash2 size={14}/>
-          </button>
+          <button className="btn-icon btn-icon-indigo" title="Editar cliente" onClick={() => onEdit(client)}><Edit2 size={14}/></button>
+          <button className="btn-icon btn-icon-danger" title="Eliminar del historial" onClick={() => onDelete(client)}><Trash2 size={14}/></button>
           {waPhone && (
             <a href={`https://wa.me/${waPhone}${isCombo ? '?text='+buildComboMsg() : ''}`}
               target="_blank" rel="noopener noreferrer"
@@ -308,16 +568,16 @@ function ClientRow({ client, idx, onEdit, onDelete }) {
   )
 }
 
-/* ── Main view ─────────────────────────────────────────────────────── */
+// ── Main view ──────────────────────────────────────────────────────────
 export default function ClientsView() {
   const { accounts, savedClients, getSubscriptionStatus, updateClientGlobal, deleteClientFromHistory } = useApp()
-
-  const [search,      setSearch]      = useState('')
-  const [sortBy,      setSortBy]      = useState('expiry')
-  const [statusFilter,setStatusFilter]= useState('all')
-  const [editTarget,  setEditTarget]  = useState(null)
-  const [delTarget,   setDelTarget]   = useState(null)
-  const [page,        setPage]        = useState(1)
+  const [view,         setView]         = useState('analytics')
+  const [search,       setSearch]       = useState('')
+  const [sortBy,       setSortBy]       = useState('expiry')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [editTarget,   setEditTarget]   = useState(null)
+  const [delTarget,    setDelTarget]    = useState(null)
+  const [page,         setPage]         = useState(1)
   const PAGE_SIZE = 20
 
   const allClients = useMemo(
@@ -327,8 +587,14 @@ export default function ClientsView() {
 
   useEffect(() => setPage(1), [search, sortBy, statusFilter])
 
-  // Filtrar y ordenar directo — sin useMemo para evitar closures stale
-  const q = search.toLowerCase().trim()
+  const counts = useMemo(() => ({
+    expired:  allClients.filter(c => c.worstStatus==='expired').length,
+    today:    allClients.filter(c => c.worstStatus==='today').length,
+    soon:     allClients.filter(c => c.worstStatus==='soon').length,
+    active:   allClients.filter(c => c.worstStatus==='active').length,
+  }), [allClients])
+
+  const q        = search.toLowerCase().trim()
   const filtered = allClients
     .filter(c => {
       if (statusFilter !== 'all' && c.worstStatus !== statusFilter) return false
@@ -341,10 +607,10 @@ export default function ClientsView() {
     .sort((a, b) => {
       if (a.isFromDownAccount && !b.isFromDownAccount) return -1
       if (!a.isFromDownAccount && b.isFromDownAccount) return 1
-      if (sortBy === 'expiry') return (a.earliestExpiry || '').localeCompare(b.earliestExpiry || '')
-      if (sortBy === 'name')   return cleanStr(a.name).localeCompare(cleanStr(b.name))
-      if (sortBy === 'subs')   return b.subs.length - a.subs.length
-      if (sortBy === 'status') {
+      if (sortBy === 'expiry')  return (a.earliestExpiry||'').localeCompare(b.earliestExpiry||'')
+      if (sortBy === 'name')    return cleanStr(a.name).localeCompare(cleanStr(b.name))
+      if (sortBy === 'subs')    return b.subs.length - a.subs.length
+      if (sortBy === 'status')  {
         const order = { expired:0, today:1, soon:2, active:3, available:4 }
         return (order[a.worstStatus]??9) - (order[b.worstStatus]??9)
       }
@@ -353,22 +619,11 @@ export default function ClientsView() {
 
   const paged = filtered.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE)
 
-  const counts = useMemo(() => ({
-    expired:  allClients.filter(c => c.worstStatus==='expired').length,
-    today:    allClients.filter(c => c.worstStatus==='today').length,
-    soon:     allClients.filter(c => c.worstStatus==='soon').length,
-    active:   allClients.filter(c => c.worstStatus==='active').length,
-  }), [allClients])
-
   const handleSave = (newName, newPhone) => {
     updateClientGlobal(editTarget.phone, editTarget.name, newName, newPhone)
     setEditTarget(null)
   }
-
-  const handleDelete = () => {
-    deleteClientFromHistory(delTarget.id)
-    setDelTarget(null)
-  }
+  const handleDelete = () => { deleteClientFromHistory(delTarget.id); setDelTarget(null) }
 
   const SORT_OPTS = [
     { value:'expiry', label:'Vencimiento ↑' },
@@ -376,17 +631,17 @@ export default function ClientsView() {
     { value:'name',   label:'A → Z'         },
     { value:'subs',   label:'Más suscripciones' },
   ]
-
   const STATUS_TABS = [
-    { id:'all',     label:'Todos',      count: allClients.length },
-    { id:'expired', label:'Vencidos',   count: counts.expired    },
-    { id:'today',   label:'Hoy',        count: counts.today      },
-    { id:'soon',    label:'Próximos',   count: counts.soon       },
-    { id:'active',  label:'Activos',    count: counts.active     },
+    { id:'all',     label:'Todos',    count: allClients.length },
+    { id:'expired', label:'Vencidos', count: counts.expired    },
+    { id:'today',   label:'Hoy',      count: counts.today      },
+    { id:'soon',    label:'Próximos', count: counts.soon       },
+    { id:'active',  label:'Activos',  count: counts.active     },
   ]
 
   return (
     <div className="space-y-5 pb-10">
+
       {/* ── Header ── */}
       <div className="flex flex-col sm:flex-row justify-between gap-3">
         <div>
@@ -400,82 +655,91 @@ export default function ClientsView() {
         </div>
       </div>
 
-      {/* ── Search + sort ── */}
-      <div className="flex items-center gap-2">
-        <div className="relative" style={{flex:'1 1 0', minWidth:0}}>
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600 pointer-events-none"/>
-          <input
-            type="text"
-            placeholder="Buscar por nombre o celular…"
-            className="form-input w-full"
-            style={{ paddingLeft:'2.25rem' }}
-            value={search}
-            onChange={e => { setSearch(e.target.value); setPage(1) }}
-          />
-        </div>
-        <select className="form-select flex-shrink-0" style={{width:'160px'}} value={sortBy} onChange={e => setSortBy(e.target.value)}>
-          {SORT_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-      </div>
-
-      {/* ── Status tabs ── */}
+      {/* ── Toggle Analytics / Lista ── */}
       <div className="tab-bar">
-        {STATUS_TABS.map(tab => (
-          <button key={tab.id}
-            className={`tab-item ${statusFilter===tab.id?'active':''}`}
-            onClick={() => { setStatusFilter(tab.id); setPage(1) }}>
-            {tab.label}
-            {tab.count > 0 && (
-              <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-white/10 text-slate-300 text-[10px] font-bold">
-                {tab.count}
-              </span>
-            )}
-          </button>
-        ))}
+        <button className={`tab-item ${view==='analytics'?'active':''}`} onClick={() => setView('analytics')}>
+          <BarChart2 size={13} className="inline mr-1.5 -mt-0.5"/>Análisis
+        </button>
+        <button className={`tab-item ${view==='lista'?'active':''}`} onClick={() => setView('lista')}>
+          <Users size={13} className="inline mr-1.5 -mt-0.5"/>Directorio
+        </button>
       </div>
 
-      {/* ── Tabla ── */}
-      <div className="glass-card !p-0 overflow-hidden">
-        <div className="data-table-wrap">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th style={{width:'2rem'}}></th>
-                <th>Nombre</th>
-                <th>Celular</th>
-                <th>Suscripciones</th>
-                <th className="text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {paged.map((client, idx) => (
-                <ClientRow key={client.id} client={client} idx={idx} onEdit={setEditTarget} onDelete={setDelTarget}/>
-              ))}
-              {paged.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="text-center py-14 text-slate-600 text-sm">
-                    No se encontraron clientes.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <Pagination page={page} total={filtered.length} perPage={PAGE_SIZE} onChange={setPage}/>
-
-      {editTarget && (
-        <EditClientModal
-          client={editTarget}
-          onSave={handleSave}
-          onClose={() => setEditTarget(null)}
-        />
+      {/* ── Vista Análisis ── */}
+      {view === 'analytics' && (
+        <ClientAnalytics accounts={accounts} allClients={allClients} />
       )}
 
-      {/* Modal confirmación eliminar */}
+      {/* ── Vista Directorio (tabla original) ── */}
+      {view === 'lista' && (
+        <>
+          {/* Search + sort */}
+          <div className="flex items-center gap-2">
+            <div className="relative" style={{flex:'1 1 0', minWidth:0}}>
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600 pointer-events-none"/>
+              <input type="text" placeholder="Buscar por nombre o celular…"
+                className="form-input w-full" style={{ paddingLeft:'2.25rem' }}
+                value={search} onChange={e => { setSearch(e.target.value); setPage(1) }}/>
+            </div>
+            <select className="form-select flex-shrink-0" style={{width:'160px'}}
+              value={sortBy} onChange={e => setSortBy(e.target.value)}>
+              {SORT_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+
+          {/* Status tabs */}
+          <div className="tab-bar">
+            {STATUS_TABS.map(tab => (
+              <button key={tab.id} className={`tab-item ${statusFilter===tab.id?'active':''}`}
+                onClick={() => { setStatusFilter(tab.id); setPage(1) }}>
+                {tab.label}
+                {tab.count > 0 && (
+                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-white/10 text-slate-300 text-[10px] font-bold">
+                    {tab.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Tabla */}
+          <div className="glass-card !p-0 overflow-hidden">
+            <div className="data-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th style={{width:'2rem'}}></th>
+                    <th>Nombre</th>
+                    <th>Celular</th>
+                    <th>Suscripciones</th>
+                    <th className="text-right">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paged.map((client, idx) => (
+                    <ClientRow key={client.id} client={client} idx={idx}
+                      onEdit={setEditTarget} onDelete={setDelTarget}/>
+                  ))}
+                  {paged.length === 0 && (
+                    <tr><td colSpan={5} className="text-center py-14 text-slate-600 text-sm">
+                      No se encontraron clientes.
+                    </td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <Pagination page={page} total={filtered.length} perPage={PAGE_SIZE} onChange={setPage}/>
+        </>
+      )}
+
+      {editTarget && (
+        <EditClientModal client={editTarget} onSave={handleSave} onClose={() => setEditTarget(null)}/>
+      )}
+
       {delTarget && createPortal(
-        <m.div className="modal-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}>
-          <m.div className="modal-box" style={{maxWidth:'22rem'}}
+        <motion.div className="modal-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}>
+          <motion.div className="modal-box" style={{maxWidth:'22rem'}}
             initial={{scale:0.95,y:16}} animate={{scale:1,y:0}}>
             <h3 className="font-bold text-slate-100 mb-1">Eliminar cliente</h3>
             <p className="text-sm text-slate-400 mb-1">
@@ -483,7 +747,7 @@ export default function ClientsView() {
             </p>
             {delTarget.subs?.length > 0 && (
               <p className="text-xs text-amber-400 mb-3">
-                ⚠️ Este cliente tiene {delTarget.subs.length} suscripción(es) activa(s). Solo se elimina del historial, no de las cuentas.
+                ⚠️ Este cliente tiene {delTarget.subs.length} suscripción(es). Solo se elimina del historial, no de las cuentas.
               </p>
             )}
             <div className="flex gap-2 mt-4">
@@ -493,8 +757,8 @@ export default function ClientsView() {
                 Sí, eliminar
               </button>
             </div>
-          </m.div>
-        </m.div>,
+          </motion.div>
+        </motion.div>,
         document.body
       )}
     </div>
