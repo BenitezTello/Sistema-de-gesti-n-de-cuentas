@@ -260,28 +260,34 @@ export function AccountForm({ onSave, onClose, initialData = {}, suppliers = [],
 }
 
 /* ── Assign / Edit client Form ─────────────────────────────────────── */
-export function AssignClientForm({ onSave, onClose, initialData = {} }) {
+export function AssignClientForm({ onSave, onClose, initialData = {}, platformName = '', platformPrice = 0 }) {
   const { accounts, savedClients } = useApp()
+  const isNewAssignment = !initialData.clientName
+
   const [form, setForm] = useState({
     clientName: initialData.clientName || '',
     phone:      initialData.phone      || '',
     pin:        initialData.pin        || '',
     expiryDate: initialData.expiryDate || '',
   })
-  const [search, setSearch] = useState('')
+  const [search,      setSearch]      = useState('')
+  const [saleType,    setSaleType]    = useState('sale')     // 'sale'|'replacement'|'gift'  (nueva asignación)
+  const [isRenewal,   setIsRenewal]   = useState(false)      // renovación en modo edición
+  const [saleAmount,  setSaleAmount]  = useState(platformPrice || 0)
+
+  // Sincronizar monto si cambia el precio de plataforma desde fuera
+  useState(() => { setSaleAmount(platformPrice || 0) }, [platformPrice])
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   // Clientes existentes únicos (por teléfono) para autocomplete
   const existingClients = useMemo(() => {
     const map = new Map()
-    // Clientes de perfiles activos
     accounts.forEach(acc => acc.profiles.forEach(p => {
       if (!p.clientName) return
       const key = p.phone?.replace(/\D/g,'') || p.clientName.toLowerCase()
       if (!map.has(key)) map.set(key, { name: p.clientName, phone: p.phone || '' })
     }))
-    // Clientes del historial (saved_clients)
     ;(savedClients || []).forEach(c => {
       const key = c.phone?.replace(/\D/g,'') || c.name?.toLowerCase()
       if (key && !map.has(key)) map.set(key, { name: c.name, phone: c.phone || '' })
@@ -305,8 +311,26 @@ export function AssignClientForm({ onSave, onClose, initialData = {} }) {
   const handleSubmit = (e) => {
     e.preventDefault()
     if (!form.expiryDate) return
-    onSave(form)
+    let extra = {}
+    if (isNewAssignment) {
+      extra = {
+        saleType,
+        saleAmount: saleType === 'sale' ? Number(saleAmount) || 0 : 0,
+      }
+    } else {
+      extra = {
+        saleType:   isRenewal ? 'renewal' : 'edit',
+        renewAmount: isRenewal ? Number(saleAmount) || 0 : 0,
+      }
+    }
+    onSave({ ...form, ...extra })
   }
+
+  const SALE_OPTS = [
+    { v: 'sale',        l: 'Compra',    desc: 'Registra ingreso',   color: '#4ade80' },
+    { v: 'replacement', l: 'Reemplazo', desc: 'Sin registro',       color: '#94a3b8' },
+    { v: 'gift',        l: 'Regalo',    desc: 'Sin registro',       color: '#94a3b8' },
+  ]
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -370,6 +394,60 @@ export function AssignClientForm({ onSave, onClose, initialData = {} }) {
           />
         </div>
       </div>
+
+      {/* ── Tipo de operación (nueva asignación) ── */}
+      {isNewAssignment && (
+        <div className="border-t border-white/[0.05] pt-3 space-y-2">
+          <label className="form-label">Tipo de operación</label>
+          <div className="flex gap-2">
+            {SALE_OPTS.map(o => (
+              <button key={o.v} type="button"
+                onClick={() => setSaleType(o.v)}
+                className="flex-1 flex flex-col items-center gap-0.5 py-2 px-1 rounded-xl text-xs font-bold transition-all"
+                style={{
+                  background: saleType === o.v ? `${o.color}18` : 'rgba(255,255,255,0.03)',
+                  border: `1px solid ${saleType === o.v ? o.color + '60' : 'rgba(255,255,255,0.07)'}`,
+                  color: saleType === o.v ? o.color : '#64748b',
+                }}>
+                {o.l}
+                <span style={{ color:'#475569', fontWeight:400, fontSize:'10px' }}>{o.desc}</span>
+              </button>
+            ))}
+          </div>
+          {saleType === 'sale' && (
+            <div>
+              <label className="form-label">Monto cobrado (S/.)</label>
+              <input type="number" min="0" step="0.5" className="form-input"
+                value={saleAmount}
+                onChange={e => setSaleAmount(e.target.value)} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Opción renovación (edición de cliente existente) ── */}
+      {!isNewAssignment && (
+        <div className="border-t border-white/[0.05] pt-3">
+          <label className="flex items-center gap-2.5 cursor-pointer select-none">
+            <div
+              onClick={() => setIsRenewal(v => !v)}
+              className="w-9 h-5 rounded-full transition-all flex-shrink-0 relative cursor-pointer"
+              style={{ background: isRenewal ? 'rgba(74,222,128,0.3)' : 'rgba(255,255,255,0.08)', border: `1px solid ${isRenewal ? '#4ade80' : 'rgba(255,255,255,0.1)'}` }}>
+              <div className="absolute top-0.5 w-4 h-4 rounded-full transition-all"
+                style={{ background: isRenewal ? '#4ade80' : '#475569', left: isRenewal ? '18px' : '2px' }}/>
+            </div>
+            <span className="text-sm text-slate-300">Registrar como renovación</span>
+          </label>
+          {isRenewal && (
+            <div className="mt-2">
+              <label className="form-label">Monto cobrado (S/.)</label>
+              <input type="number" min="0" step="0.5" className="form-input"
+                value={saleAmount}
+                onChange={e => setSaleAmount(e.target.value)} />
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-2 pt-2">
         <button type="button" className="btn-secondary flex-1" onClick={onClose}>Cancelar</button>

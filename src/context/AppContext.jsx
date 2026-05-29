@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { isToday, isBefore, format, differenceInCalendarDays } from 'date-fns'
+import { downloadXLSX } from '../utils/excel'
 
 const AppContext = createContext()
 
@@ -31,13 +32,15 @@ async function api(path, method = 'GET', body) {
 }
 
 export const AppProvider = ({ children, user }) => {
-  const [accounts,      setAccounts]      = useState([])
-  const [suppliers,     setSuppliers]     = useState([])
-  const [savedClients,  setSavedClients]  = useState([])
-  const [users,         setUsers]         = useState([])
-  const [toasts,        setToasts]        = useState([])
-  const [loading,       setLoading]       = useState(true)
-  const [lastAssigned,  setLastAssigned]  = useState(null)
+  const [accounts,        setAccounts]        = useState([])
+  const [suppliers,       setSuppliers]       = useState([])
+  const [savedClients,    setSavedClients]    = useState([])
+  const [users,           setUsers]           = useState([])
+  const [toasts,          setToasts]          = useState([])
+  const [loading,         setLoading]         = useState(true)
+  const [lastAssigned,    setLastAssigned]    = useState(null)
+  const [platformPrices,  setPlatformPrices]  = useState([])
+  const [financialSummary,setFinancialSummary]= useState(null)
 
   // ── Cargar datos desde la API al montar ────────────────────────────
   useEffect(() => {
@@ -46,6 +49,7 @@ export const AppProvider = ({ children, user }) => {
       .catch(err => console.error('[DB] Error cargando datos:', err))
       .finally(() => setLoading(false))
     api('/clients').then(c => setSavedClients(c || [])).catch(() => {})
+    api('/platform-prices').then(p => setPlatformPrices(p || [])).catch(() => {})
     if (user?.role === 'admin') {
       api('/users').then(u => setUsers(u || [])).catch(() => {})
     }
@@ -181,7 +185,8 @@ export const AppProvider = ({ children, user }) => {
     await _patchProfile(accountId, profileId, { ...clientData, status: 'active' })
     setLastAssigned(accountId)
     if (clientData.clientName) saveClientToHistory(clientData.clientName, clientData.phone)
-    showToast('Cliente asignado', 'success')
+    const msg = clientData.saleType === 'sale' ? 'Cliente asignado · ingreso registrado ✓' : 'Cliente asignado'
+    showToast(msg, 'success')
   }, [_patchProfile, showToast, saveClientToHistory])
 
   const releaseProfile = useCallback(async (accountId, profileId) => {
@@ -221,9 +226,12 @@ export const AppProvider = ({ children, user }) => {
     showToast('Perfil liberado · PIN actualizado', 'success')
   }, [_patchProfile, showToast, accounts, saveClientToHistory])
 
-  const extendProfile = useCallback(async (accountId, profileId, newDateStr, label) => {
-    await _patchProfile(accountId, profileId, { expiryDate: newDateStr })
-    showToast(`Renovado ${label} ✓`, 'success')
+  const extendProfile = useCallback(async (accountId, profileId, newDateStr, label, renewAmount = 0) => {
+    const payload = { expiryDate: newDateStr }
+    if (renewAmount > 0) { payload.saleType = 'renewal'; payload.renewAmount = renewAmount }
+    await _patchProfile(accountId, profileId, payload)
+    const msg = renewAmount > 0 ? `Renovado ${label} · ingreso registrado ✓` : `Renovado ${label} ✓`
+    showToast(msg, 'success')
   }, [_patchProfile, showToast])
 
   const extendAccount = useCallback(async (accountId, newDateStr, label) => {
@@ -275,6 +283,31 @@ export const AppProvider = ({ children, user }) => {
     showToast('Usuario eliminado', 'info')
   }, [showToast])
 
+  // ── Platform Prices ────────────────────────────────────────────────
+  const getPlatformPrice = useCallback((platform) => {
+    return platformPrices.find(p => p.platform === platform)?.price ?? 0
+  }, [platformPrices])
+
+  const updatePlatformPrice = useCallback(async (platform, price) => {
+    await api(`/platform-prices/${encodeURIComponent(platform)}`, 'PUT', { price })
+    setPlatformPrices(prev => prev.map(p => p.platform === platform ? { ...p, price } : p))
+    showToast(`Precio de ${platform} actualizado`, 'success')
+  }, [showToast])
+
+  // ── Financial Summary ──────────────────────────────────────────────
+  const loadFinancialSummary = useCallback(async (from = '', to = '') => {
+    try {
+      const qs = new URLSearchParams({ from, to }).toString()
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/data/summary?${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      setFinancialSummary(data)
+      return data
+    } catch { return null }
+  }, [])
+
   // ── Suppliers CRUD ──────────────────────────────────────────────────
   const addSupplier = useCallback(async (data) => {
     try {
@@ -299,23 +332,20 @@ export const AppProvider = ({ children, user }) => {
     } catch { showToast('Error al eliminar proveedor', 'error') }
   }, [showToast])
 
-  // ── Export CSV ─────────────────────────────────────────────────────
-  const exportToCSV = useCallback(() => {
+  // ── Export Excel ───────────────────────────────────────────────────
+  const exportToXLSX = useCallback(() => {
+    const STATUS_LABEL = { active: 'Activo', today: 'Vence hoy', soon: 'Pronto', expired: 'Vencido', available: 'Disponible' }
     const rows = [['Plataforma','Correo','Perfil','PIN','Cliente','Celular','Vencimiento','Estado']]
     accounts.forEach(acc => {
       acc.profiles.forEach(p => {
         if (!p.clientName) return
+        const st = getSubscriptionStatus(p.expiryDate)
         rows.push([acc.platform, acc.email, p.number, p.pin,
-          p.clientName, p.phone, p.expiryDate, getSubscriptionStatus(p.expiryDate)])
+          p.clientName, p.phone, p.expiryDate, STATUS_LABEL[st] || st])
       })
     })
-    const csv  = rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n')
-    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
-    const url  = URL.createObjectURL(blob)
-    const a    = document.createElement('a')
-    a.href = url; a.download = `suscripciones_${format(new Date(), 'yyyy-MM-dd')}.csv`
-    a.click(); URL.revokeObjectURL(url)
-    showToast('CSV exportado', 'success')
+    downloadXLSX(rows, 'Suscripciones', `suscripciones_${format(new Date(), 'yyyy-MM-dd')}.xlsx`)
+    showToast('Excel exportado', 'success')
   }, [accounts, getSubscriptionStatus, showToast])
 
   return (
@@ -330,8 +360,10 @@ export const AppProvider = ({ children, user }) => {
       assignClientToProfile, releaseProfile, releaseProfileWithPIN, releaseFullClient,
       extendProfile, extendFullAccountClient, extendAccount, extendClientAllProfiles,
       addSupplier, updateSupplier, deleteSupplier,
-      updateClientGlobal, exportToCSV,
+      updateClientGlobal, exportToXLSX,
       users, createAppUser, updateAppUser, deleteAppUser,
+      platformPrices, getPlatformPrice, updatePlatformPrice,
+      financialSummary, loadFinancialSummary,
     }}>
       {children}
     </AppContext.Provider>

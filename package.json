@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n UI,APP,WA -c cyan,green,yellow \"vite\" \"node server/index.js\" \"node server/wa.js\"",
+    "dev": "concurrently -n UI,APP,WA -c cyan,green,yellow \"vite\" \"cross-env PORT=3002 node server/index.js\" \"node server/wa.js\"",
     "dev:ui": "vite",
-    "dev:app": "node server/index.js",
+    "dev:app": "cross-env PORT=3002 node server/index.js",
     "dev:wa": "node server/wa.js",
     "build": "vite build",
     "start": "node server/index.js",
@@ -24,7 +24,8 @@
     "lucide-react": "^1.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "tailwindcss": "^4.2.4"
+    "tailwindcss": "^4.2.4",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -32,6 +33,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
     "eslint": "^10.2.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",

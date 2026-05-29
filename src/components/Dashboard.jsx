@@ -1,12 +1,14 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import {
   AlertTriangle, Bell, Clock, CheckCircle,
-  Copy, MessageSquare, Send, Download, Loader2, CheckCheck,
-  MonitorPlay, Tv, Users, Truck, Wifi, WifiOff, TrendingUp, Package
+  MessageSquare, Send, Download, Loader2, CheckCheck,
+  MonitorPlay, Tv, Users, Truck, Wifi, WifiOff, TrendingUp, TrendingDown, DollarSign, Package,
+  Target, BarChart2, Percent, CalendarClock,
 } from 'lucide-react'
 import { useApp } from '../context/AppContext'
-import { differenceInCalendarDays } from 'date-fns'
+import { differenceInCalendarDays, format, startOfMonth, endOfMonth, parseISO, isSameMonth } from 'date-fns'
+import { es } from 'date-fns/locale'
 import Pagination from './Pagination'
 
 const PLATFORM_CLASS = {
@@ -72,12 +74,31 @@ function buildMsg(sub) {
   )
 }
 
+async function fetchJson(path) {
+  const token = localStorage.getItem('token')
+  const res = await fetch(`/api/data${path}`, { headers: { Authorization: `Bearer ${token}` } })
+  if (!res.ok) throw new Error(res.status)
+  return res.json()
+}
+
 export default function Dashboard({ onNavigate }) {
-  const { accounts, getSubscriptionStatus, copyToClipboard, exportToCSV, showToast } = useApp()
-  const [filter,   setFilter]   = useState('all')
-  const [page,     setPage]     = useState(1)
-  const [sending,  setSending]  = useState(new Set())
-  const [sent,     setSent]     = useState(new Set())
+  const { accounts, getSubscriptionStatus, copyToClipboard, exportToXLSX, showToast, loadFinancialSummary, currentUser, platformPrices, getPlatformPrice } = useApp()
+  const isAdmin = currentUser?.role === 'admin'
+  const [filter,        setFilter]        = useState('all')
+  const [page,          setPage]          = useState(1)
+  const [sending,       setSending]       = useState(new Set())
+  const [sent,          setSent]          = useState(new Set())
+  const [summary,       setSummary]       = useState(null)
+  const [monthlyData,   setMonthlyData]   = useState([])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    const now  = new Date()
+    const from = format(startOfMonth(now), 'yyyy-MM-dd')
+    const to   = format(endOfMonth(now),   'yyyy-MM-dd')
+    loadFinancialSummary(from, to).then(s => { if (s) setSummary(s) })
+    fetchJson('/monthly-summary?months=6').then(d => setMonthlyData(d)).catch(() => {})
+  }, [loadFinancialSummary, isAdmin])
 
   // ── Métricas de suscripciones ────────────────────────────────────────
   const allSubs = accounts.flatMap(acc =>
@@ -199,7 +220,7 @@ export default function Dashboard({ onNavigate }) {
             transition={{ delay: i * 0.06 }}
             onClick={() => onNavigate(nav)}
             className="flex flex-col sm:flex-row items-start sm:items-center gap-3 rounded-2xl text-left transition-all hover:-translate-y-0.5"
-            style={{ padding:'1.1rem 1rem', background:'rgba(15,23,42,0.8)', border:`1px solid rgba(255,255,255,0.07)`, borderLeft:`3px solid ${color}`, boxShadow:'0 4px 20px rgba(0,0,0,0.25)' }}>
+            style={{ padding:'1.1rem 1rem', background:'rgba(11,20,12,0.88)', border:`1px solid rgba(255,255,255,0.07)`, borderLeft:`3px solid ${color}`, boxShadow:'0 2px 12px rgba(0,0,0,0.28)' }}>
             <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
               style={{ background:`${color}18`, color }}>
               <Icon size={20}/>
@@ -236,6 +257,35 @@ export default function Dashboard({ onNavigate }) {
           </motion.div>
         ))}
       </div>
+
+      {/* ── Resumen financiero del mes (solo admin) ── */}
+      {isAdmin && summary && (
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            { label: 'Ingresos mes', value: summary.income_total,  icon: TrendingUp,   color: '#4ade80', nav: 'payments' },
+            { label: 'Egresos mes',  value: summary.expense_total, icon: TrendingDown, color: '#f87171', nav: 'payments' },
+            { label: 'Ganancia neta',value: summary.net_profit,    icon: DollarSign,   color: summary.net_profit >= 0 ? '#a78bfa' : '#fb923c', nav: 'payments' },
+          ].map(({ label, value, icon: Icon, color, nav }, i) => (
+            <motion.button key={label}
+              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 + i * 0.05 }}
+              onClick={() => onNavigate(nav)}
+              className="flex flex-col sm:flex-row items-start sm:items-center gap-2 rounded-2xl text-left transition-all hover:-translate-y-0.5"
+              style={{ padding:'0.9rem 1rem', background:'rgba(11,20,12,0.88)', border:`1px solid rgba(255,255,255,0.07)`, borderLeft:`3px solid ${color}`, boxShadow:'0 2px 12px rgba(0,0,0,0.28)' }}>
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+                style={{ background:`${color}18`, color }}>
+                <Icon size={17}/>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 font-medium leading-tight">{label}</p>
+                <p className="text-xl font-bold mt-0.5 leading-none" style={{ color }}>
+                  S/. {Number(value || 0).toFixed(2)}
+                </p>
+              </div>
+            </motion.button>
+          ))}
+        </div>
+      )}
 
       {/* ── Navegación rápida móvil (solo móvil) ── */}
       <div className="grid grid-cols-3 gap-3 md:hidden">
@@ -299,10 +349,10 @@ export default function Dashboard({ onNavigate }) {
           </div>
         </motion.button>
 
-        {/* Exportar CSV */}
+        {/* Exportar Excel */}
         <motion.button
           initial={{ opacity:0, y:12 }} animate={{ opacity:1, y:0 }} transition={{ delay:0.4 }}
-          onClick={exportToCSV}
+          onClick={exportToXLSX}
           className="glass-card flex items-center gap-4 text-left hover:-translate-y-0.5 transition-all"
           style={{ borderLeft:'3px solid #60a5fa' }}>
           <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
@@ -310,44 +360,329 @@ export default function Dashboard({ onNavigate }) {
             <Download size={20}/>
           </div>
           <div>
-            <p className="font-bold text-slate-200">Exportar CSV</p>
+            <p className="font-bold text-slate-200">Exportar Excel</p>
             <p className="text-sm text-slate-500 mt-0.5">{allSubs.length} suscripciones activas</p>
           </div>
         </motion.button>
       </div>
 
-      {/* ── Distribución por plataforma ── */}
+      {/* ════════════════════════════════════════════════════════
+          SECCIÓN 1 — Tasa de ocupación en tiempo real
+          ════════════════════════════════════════════════════════ */}
       {(() => {
         const byPlat = {}
+        let totalSlots = 0, totalOccupied = 0
         accounts.forEach(acc => {
           if (!byPlat[acc.platform]) byPlat[acc.platform] = { total: 0, occupied: 0 }
-          byPlat[acc.platform].total    += acc.profiles.length
-          byPlat[acc.platform].occupied += acc.profiles.filter(p => p.clientName).length
+          const occ = acc.isFullAccount
+            ? (acc.fullClient?.clientName ? 1 : 0)
+            : acc.profiles.filter(p => p.clientName).length
+          const tot = acc.isFullAccount ? 1 : acc.profiles.length
+          byPlat[acc.platform].total    += tot
+          byPlat[acc.platform].occupied += occ
+          totalSlots    += tot
+          totalOccupied += occ
         })
-        const entries = Object.entries(byPlat).sort((a,b) => b[1].occupied - a[1].occupied)
+        const globalPct = totalSlots > 0 ? Math.round(totalOccupied / totalSlots * 100) : 0
+        const entries = Object.entries(byPlat).sort((a, b) => b[1].occupied - a[1].occupied)
         if (!entries.length) return null
+
+        const gaugeColor = globalPct >= 90 ? '#f87171' : globalPct >= 70 ? '#4ade80' : '#60a5fa'
+        // SVG ring gauge
+        const r = 36, circ = 2 * Math.PI * r
+        const dash = (globalPct / 100) * circ
+
         return (
           <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.45 }}
             className="glass-card">
-            <h3 className="font-bold text-slate-200 mb-4">Ocupación por plataforma</h3>
-            <div className="space-y-3">
-              {entries.map(([plat, data]) => {
-                const pct = data.total > 0 ? Math.round(data.occupied / data.total * 100) : 0
-                const cls = PLATFORM_CLASS[plat] || 'plat-default'
+            <div className="flex items-center gap-2 mb-4">
+              <Target size={16} style={{ color:'#a78bfa' }}/>
+              <h3 className="font-bold text-slate-200 text-sm">Tasa de ocupación</h3>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-6 items-center sm:items-start">
+              {/* Gauge circular */}
+              <div className="flex flex-col items-center flex-shrink-0">
+                <svg width="96" height="96" viewBox="0 0 96 96">
+                  <circle cx="48" cy="48" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="8"/>
+                  <circle cx="48" cy="48" r={r} fill="none"
+                    stroke={gaugeColor} strokeWidth="8"
+                    strokeDasharray={`${dash} ${circ}`}
+                    strokeLinecap="round"
+                    transform="rotate(-90 48 48)"
+                    style={{ transition: 'stroke-dasharray 0.6s ease' }}
+                  />
+                  <text x="48" y="44" textAnchor="middle" fontSize="18" fontWeight="700" fill={gaugeColor}>{globalPct}%</text>
+                  <text x="48" y="58" textAnchor="middle" fontSize="9" fill="#475569">ocupado</text>
+                </svg>
+                <p className="text-xs text-slate-500 mt-1">{totalOccupied}/{totalSlots} perfiles</p>
+              </div>
+
+              {/* Barras por plataforma */}
+              <div className="flex-1 space-y-2.5 w-full">
+                {entries.map(([plat, data]) => {
+                  const pct = data.total > 0 ? Math.round(data.occupied / data.total * 100) : 0
+                  const bar = pct >= 90 ? '#f87171' : pct >= 70 ? '#4ade80' : '#60a5fa'
+                  return (
+                    <div key={plat}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${PLATFORM_CLASS[plat] || ''}`}>
+                          {plat}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-600">{data.occupied}/{data.total}</span>
+                          <span className="text-xs font-bold tabular-nums" style={{ color: bar, minWidth:'36px', textAlign:'right' }}>
+                            {pct}%
+                          </span>
+                        </div>
+                      </div>
+                      <div className="h-1.5 rounded-full" style={{ background:'rgba(255,255,255,0.06)' }}>
+                        <div className="h-full rounded-full transition-all duration-500"
+                          style={{ width:`${pct}%`, background: bar }}/>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </motion.div>
+        )
+      })()}
+
+      {/* ════════════════════════════════════════════════════════
+          SECCIÓN 2 — Gráfico ingresos/egresos últimos 6 meses (admin)
+          ════════════════════════════════════════════════════════ */}
+      {isAdmin && monthlyData.length > 0 && (() => {
+        const maxVal = Math.max(...monthlyData.flatMap(m => [m.income, m.expense]), 1)
+        const BAR_H  = 100 // px máximo de barra
+
+        return (
+          <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.5 }}
+            className="glass-card">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <BarChart2 size={16} style={{ color:'#a78bfa' }}/>
+                <h3 className="font-bold text-slate-200 text-sm">Tendencia mensual</h3>
+              </div>
+              <div className="flex items-center gap-3 text-[11px] text-slate-500">
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background:'#4ade80' }}/> Ingresos</span>
+                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background:'#f87171' }}/> Egresos</span>
+              </div>
+            </div>
+
+            <div className="flex items-end justify-around gap-1" style={{ height: `${BAR_H + 36}px` }}>
+              {monthlyData.map((m) => {
+                const inH  = Math.round((m.income  / maxVal) * BAR_H)
+                const exH  = Math.round((m.expense / maxVal) * BAR_H)
+                const [y, mo] = m.month.split('-')
+                const label = format(new Date(Number(y), Number(mo) - 1, 1), 'MMM', { locale: es })
+
                 return (
-                  <div key={plat}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${cls}`}>{plat}</span>
-                      <span className="text-xs text-slate-500">{data.occupied}/{data.total} · {pct}%</span>
+                  <div key={m.month} className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                    <div className="flex items-end gap-0.5 w-full justify-center" style={{ height: `${BAR_H}px` }}>
+                      {/* Ingreso */}
+                      <div title={`Ingreso: S/. ${m.income.toFixed(2)}`}
+                        className="rounded-t-md transition-all duration-700 cursor-default"
+                        style={{ width:'40%', height:`${inH || 2}px`, background: inH ? '#4ade80' : 'rgba(74,222,128,0.15)', minHeight:'2px' }}/>
+                      {/* Egreso */}
+                      <div title={`Egreso: S/. ${m.expense.toFixed(2)}`}
+                        className="rounded-t-md transition-all duration-700 cursor-default"
+                        style={{ width:'40%', height:`${exH || 2}px`, background: exH ? '#f87171' : 'rgba(248,113,113,0.15)', minHeight:'2px' }}/>
                     </div>
-                    <div className="h-1.5 rounded-full" style={{ background:'rgba(255,255,255,0.06)' }}>
-                      <div className="h-full rounded-full transition-all"
-                        style={{ width:`${pct}%`, background: pct>90?'#f87171': pct>70?'#4ade80':'#60a5fa' }}/>
-                    </div>
+                    <span className="text-[10px] text-slate-500 capitalize truncate w-full text-center">{label}</span>
+                    {m.income > 0 && (
+                      <span className="text-[9px] font-bold" style={{ color:'#4ade80' }}>
+                        +{m.income.toFixed(0)}
+                      </span>
+                    )}
                   </div>
                 )
               })}
             </div>
+          </motion.div>
+        )
+      })()}
+
+      {/* ════════════════════════════════════════════════════════
+          SECCIÓN 3 — ROI por plataforma (admin)
+          ════════════════════════════════════════════════════════ */}
+      {isAdmin && summary?.by_platform?.length > 0 && (() => {
+        const plats = summary.by_platform
+          .filter(p => p.income > 0 || p.expense > 0)
+          .map(p => ({
+            ...p,
+            roi: p.expense > 0 ? Math.round(((p.income - p.expense) / p.expense) * 100) : null,
+          }))
+          .sort((a, b) => (b.roi ?? -Infinity) - (a.roi ?? -Infinity))
+        if (!plats.length) return null
+
+        return (
+          <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.55 }}
+            className="glass-card">
+            <div className="flex items-center gap-2 mb-4">
+              <Percent size={16} style={{ color:'#a78bfa' }}/>
+              <h3 className="font-bold text-slate-200 text-sm">ROI por plataforma <span className="text-slate-600 font-normal text-xs">(mes actual)</span></h3>
+            </div>
+            <div className="space-y-2">
+              {plats.map(p => {
+                const roi = p.roi
+                const roiColor = roi === null ? '#475569' : roi >= 100 ? '#4ade80' : roi >= 0 ? '#fbbf24' : '#f87171'
+                const roiLabel = roi === null ? 'Sin egreso' : `${roi >= 0 ? '+' : ''}${roi}%`
+                return (
+                  <div key={p.platform} className="flex items-center gap-3 py-2 px-3 rounded-xl"
+                    style={{ background:'rgba(255,255,255,0.03)' }}>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold flex-shrink-0 ${PLATFORM_CLASS[p.platform] || 'bg-slate-800 text-slate-300'}`}>
+                      {p.platform || '—'}
+                    </span>
+                    <div className="flex-1 flex items-center gap-2 text-xs text-slate-500">
+                      <span className="text-emerald-500">+{p.income.toFixed(2)}</span>
+                      <span>/</span>
+                      <span className="text-red-400">-{p.expense.toFixed(2)}</span>
+                    </div>
+                    <span className="text-sm font-bold tabular-nums" style={{ color: roiColor }}>
+                      {roiLabel}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            <p className="text-[11px] text-slate-600 mt-3 px-1">
+              ROI = (Ingreso − Egreso) / Egreso × 100. Verde ≥ 100%, Amarillo ≥ 0%, Rojo = pérdida.
+            </p>
+          </motion.div>
+        )
+      })()}
+
+      {/* ════════════════════════════════════════════════════════
+          SECCIÓN 4 — Proyección de cobros pendientes (admin)
+          ════════════════════════════════════════════════════════ */}
+      {isAdmin && (() => {
+        const now = new Date(); now.setHours(0,0,0,0)
+        const endMonth = endOfMonth(now)
+
+        // ── Ingresos: perfiles con cliente que vencen este mes ────────
+        const incomeItems = []
+        accounts.forEach(acc => {
+          if (acc.isDown) return
+          if (acc.isFullAccount) {
+            const fc = acc.fullClient
+            if (!fc?.clientName || !fc?.expiryDate) return
+            const exp = new Date(fc.expiryDate + 'T00:00:00')
+            if (exp <= endMonth)
+              incomeItems.push({ platform: acc.platform, price: getPlatformPrice(acc.platform), expired: exp < now })
+          } else {
+            acc.profiles.forEach(p => {
+              if (!p.clientName || !p.expiryDate) return
+              const exp = new Date(p.expiryDate + 'T00:00:00')
+              if (exp <= endMonth)
+                incomeItems.push({ platform: acc.platform, price: getPlatformPrice(acc.platform), expired: exp < now })
+            })
+          }
+        })
+
+        // ── Egresos: cuentas con expiryDate este mes y cost > 0 ───────
+        const expenseItems = []
+        accounts.forEach(acc => {
+          if (acc.isDown || !acc.expiryDate || !(acc.cost > 0)) return
+          const exp = new Date(acc.expiryDate + 'T00:00:00')
+          if (exp <= endMonth)
+            expenseItems.push({ platform: acc.platform, cost: acc.cost, expired: exp < now })
+        })
+
+        if (!incomeItems.length && !expenseItems.length) return null
+
+        const totalIncome  = incomeItems.reduce((s, i) => s + i.price, 0)
+        const totalCost    = expenseItems.reduce((s, i) => s + i.cost,  0)
+        const netProjected = totalIncome - totalCost
+        const netColor     = netProjected >= 0 ? '#4ade80' : '#f87171'
+
+        // Agrupar por plataforma
+        const byIncome = {}
+        incomeItems.forEach(i => {
+          if (!byIncome[i.platform]) byIncome[i.platform] = { count: 0, total: 0 }
+          byIncome[i.platform].count++
+          byIncome[i.platform].total += i.price
+        })
+        const byExpense = {}
+        expenseItems.forEach(i => {
+          if (!byExpense[i.platform]) byExpense[i.platform] = { count: 0, total: 0 }
+          byExpense[i.platform].count++
+          byExpense[i.platform].total += i.cost
+        })
+
+        const PlatRow = ({ plat, count, total, sign, color, unit }) => (
+          <div className="flex items-center gap-3 py-1.5 px-3 rounded-xl" style={{ background:'rgba(255,255,255,0.03)' }}>
+            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold flex-shrink-0 ${PLATFORM_CLASS[plat] || ''}`}>
+              {plat}
+            </span>
+            <span className="text-xs text-slate-500 flex-1">{count} {unit}{count !== 1 ? 's' : ''}</span>
+            <span className="text-xs font-bold tabular-nums" style={{ color }}>
+              {sign}S/. {total.toFixed(2)}
+            </span>
+          </div>
+        )
+
+        return (
+          <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.6 }}
+            className="glass-card"
+            style={{ borderLeft:'3px solid #fbbf24' }}>
+
+            <div className="flex items-center gap-2 mb-4">
+              <CalendarClock size={16} style={{ color:'#fbbf24' }}/>
+              <h3 className="font-bold text-slate-200 text-sm">Proyección del mes</h3>
+            </div>
+
+            {/* ── Ingresos ── */}
+            {incomeItems.length > 0 && (
+              <div className="mb-3">
+                <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider px-3 mb-1.5">
+                  Ingresos proyectados · {incomeItems.length} cliente{incomeItems.length !== 1 ? 's' : ''}
+                </p>
+                <div className="space-y-1">
+                  {Object.entries(byIncome).sort((a,b) => b[1].total - a[1].total).map(([plat, d]) => (
+                    <PlatRow key={plat} plat={plat} count={d.count} total={d.total} sign="+" color="#4ade80" unit="cliente" />
+                  ))}
+                </div>
+                <div className="flex justify-end mt-1.5 pr-3">
+                  <span className="text-sm font-bold text-emerald-400">Total: +S/. {totalIncome.toFixed(2)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* ── Egresos ── */}
+            {expenseItems.length > 0 && (
+              <>
+                <div style={{ height:'1px', background:'rgba(255,255,255,0.05)', margin:'0.75rem 0' }}/>
+                <div className="mb-3">
+                  <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider px-3 mb-1.5">
+                    Egresos proyectados · {expenseItems.length} cuenta{expenseItems.length !== 1 ? 's' : ''}
+                  </p>
+                  <div className="space-y-1">
+                    {Object.entries(byExpense).sort((a,b) => b[1].total - a[1].total).map(([plat, d]) => (
+                      <PlatRow key={plat} plat={plat} count={d.count} total={d.total} sign="-" color="#f87171" unit="cuenta" />
+                    ))}
+                  </div>
+                  <div className="flex justify-end mt-1.5 pr-3">
+                    <span className="text-sm font-bold text-red-400">Total: -S/. {totalCost.toFixed(2)}</span>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* ── Comparativa final ── */}
+            {incomeItems.length > 0 && expenseItems.length > 0 && (
+              <>
+                <div style={{ height:'1px', background:'rgba(255,255,255,0.05)', margin:'0.75rem 0' }}/>
+                <div className="flex items-center justify-between px-3 py-2 rounded-xl"
+                  style={{ background: netProjected >= 0 ? 'rgba(74,222,128,0.06)' : 'rgba(248,113,113,0.06)', border:`1px solid ${netColor}25` }}>
+                  <span className="text-xs font-bold text-slate-400">Ganancia proyectada</span>
+                  <span className="text-lg font-bold" style={{ color: netColor }}>
+                    {netProjected >= 0 ? '+' : ''}S/. {netProjected.toFixed(2)}
+                  </span>
+                </div>
+              </>
+            )}
+
           </motion.div>
         )
       })()}

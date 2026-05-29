@@ -88,6 +88,58 @@ try {
   db.exec(`UPDATE users SET permissions='["all"]' WHERE role='admin' AND (permissions='' OR permissions='[]' OR permissions IS NULL)`)
 } catch (_) {}
 
+// ── Migraciones Feature 3: Pagos ─────────────────────────────────────
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS platform_prices (
+    id         TEXT PRIMARY KEY,
+    platform   TEXT UNIQUE NOT NULL,
+    price      REAL NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  )`)
+  const ppCount = db.prepare('SELECT COUNT(*) as c FROM platform_prices').get().c
+  if (ppCount === 0) {
+    const ins = db.prepare('INSERT OR IGNORE INTO platform_prices (id, platform, price) VALUES (?, ?, ?)')
+    ;[
+      ['pp1','Netflix',13.0], ['pp2','Disney+',6.5],   ['pp3','HBO Max',6.0],
+      ['pp4','Prime Video',6.0], ['pp5','Crunchyroll',5.0], ['pp6','Movistar+',5.0],
+    ].forEach(([id, p, pr]) => ins.run(id, p, pr))
+  }
+} catch (_) {}
+
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS transactions (
+    id           TEXT PRIMARY KEY,
+    type         TEXT NOT NULL,
+    category     TEXT NOT NULL,
+    platform     TEXT DEFAULT '',
+    amount       REAL NOT NULL,
+    client_name  TEXT DEFAULT '',
+    client_phone TEXT DEFAULT '',
+    profile_id   TEXT DEFAULT '',
+    account_id   TEXT DEFAULT '',
+    supplier_id  TEXT DEFAULT '',
+    notes        TEXT DEFAULT '',
+    user_id      TEXT NOT NULL,
+    username     TEXT NOT NULL,
+    created_at   TEXT DEFAULT (datetime('now'))
+  )`)
+} catch (_) {}
+
+// ── Migraciones Feature 2: Audit Log ──────────────────────────────────
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    username    TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    entity      TEXT NOT NULL,
+    entity_id   TEXT DEFAULT '',
+    description TEXT NOT NULL,
+    ip_address  TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now'))
+  )`)
+} catch (_) {}
+
 // ── Helpers de mapeo (DB → JS) ──────────────────────────────────────
 function mapProfile(p) {
   return {
@@ -337,6 +389,69 @@ function saveClient(name, phone) {
   return { id, name: name.trim(), phone: phone || '' }
 }
 
+// ── Audit Log ────────────────────────────────────────────────────────────
+const _auditInsert = db.prepare(`
+  INSERT INTO audit_log (id, user_id, username, action, entity, entity_id, description, ip_address)
+  VALUES (@id, @userId, @username, @action, @entity, @entityId, @description, @ip)
+`)
+
+function logAction(userId, username, action, entity, entityId, description, ip) {
+  try {
+    const logId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+    _auditInsert.run({
+      id: logId, userId, username, action, entity,
+      entityId: entityId || '',
+      description,
+      ip: ip || '',
+    })
+  } catch (err) {
+    console.error('[AUDIT] Error al guardar log:', err.message)
+  }
+}
+
+function purgeAuditLog(beforeDate) {
+  const result = db.prepare("DELETE FROM audit_log WHERE date(created_at) < ?").run(beforeDate)
+  return result.changes
+}
+
+function getAuditLog({ page = 1, limit = 50, user = '', entity = '', from = '', to = '' } = {}) {
+  const where  = []
+  const params = {}
+  if (user)   { where.push('username LIKE @user');   params.user   = `%${user}%` }
+  if (entity) { where.push('entity = @entity');      params.entity = entity }
+  if (from)   { where.push("date(created_at) >= @from"); params.from = from }
+  if (to)     { where.push("date(created_at) <= @to");   params.to   = to }
+  const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const offset = (Math.max(1, page) - 1) * limit
+  const total  = db.prepare(`SELECT COUNT(*) as c FROM audit_log ${whereClause}`).get(params).c
+  const rows   = db.prepare(
+    `SELECT * FROM audit_log ${whereClause} ORDER BY created_at DESC LIMIT @limit OFFSET @offset`
+  ).all({ ...params, limit, offset })
+  return { rows, total, page: Number(page), limit, pages: Math.ceil(total / limit) || 1 }
+}
+
+// ── Helpers para audit (lookup antes de delete) ───────────────────────
+function getProfileWithAccount(profileId) {
+  return db.prepare(`
+    SELECT p.*, a.platform, a.email
+    FROM profiles p
+    JOIN accounts a ON p.account_id = a.id
+    WHERE p.id = ?
+  `).get(profileId)
+}
+
+function getSavedClientById(id) {
+  return db.prepare('SELECT * FROM saved_clients WHERE id = ?').get(id)
+}
+
+function getSupplierById(id) {
+  return db.prepare('SELECT * FROM suppliers WHERE id = ?').get(id)
+}
+
+function getUserById(id) {
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(id)
+}
+
 // ── Users ────────────────────────────────────────────────────────────────
 function getUserByUsername(username) {
   return db.prepare('SELECT * FROM users WHERE username = ?').get(username)
@@ -371,6 +486,175 @@ function deleteUser(id) {
   db.prepare('DELETE FROM users WHERE id = ?').run(id)
 }
 
+// ── Platform Prices ──────────────────────────────────────────────────
+function getPlatformPrices() {
+  return db.prepare('SELECT * FROM platform_prices ORDER BY platform ASC').all()
+}
+
+function getPlatformPrice(platform) {
+  const row = db.prepare('SELECT price FROM platform_prices WHERE platform = ?').get(platform)
+  return row ? row.price : 0
+}
+
+function updatePlatformPrice(platform, price) {
+  db.prepare("UPDATE platform_prices SET price = ?, updated_at = datetime('now') WHERE platform = ?")
+    .run(price, platform)
+}
+
+// ── Transactions ─────────────────────────────────────────────────────
+const _txInsert = db.prepare(`
+  INSERT INTO transactions
+    (id, type, category, platform, amount, client_name, client_phone,
+     profile_id, account_id, supplier_id, notes, user_id, username)
+  VALUES
+    (@id, @type, @category, @platform, @amount, @clientName, @clientPhone,
+     @profileId, @accountId, @supplierId, @notes, @userId, @username)
+`)
+
+function createTransaction(data) {
+  const txId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+  _txInsert.run({
+    id: txId,
+    type:        data.type,
+    category:    data.category,
+    platform:    data.platform    || '',
+    amount:      data.amount,
+    clientName:  data.clientName  || '',
+    clientPhone: data.clientPhone || '',
+    profileId:   data.profileId   || '',
+    accountId:   data.accountId   || '',
+    supplierId:  data.supplierId  || '',
+    notes:       data.notes       || '',
+    userId:      data.userId,
+    username:    data.username,
+  })
+  return txId
+}
+
+function getTransactions({ from = '', to = '', type = '', platform = '', page = 1, limit = 50 } = {}) {
+  const where  = []
+  const params = {}
+  if (from)     { where.push("date(created_at) >= @from"); params.from     = from }
+  if (to)       { where.push("date(created_at) <= @to");   params.to       = to }
+  if (type)     { where.push('type = @type');               params.type     = type }
+  if (platform) { where.push('platform = @platform');       params.platform = platform }
+  const wc     = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const offset = (Math.max(1, page) - 1) * limit
+  const total  = db.prepare(`SELECT COUNT(*) as c FROM transactions ${wc}`).get(params).c
+  const rows   = db.prepare(
+    `SELECT * FROM transactions ${wc} ORDER BY created_at DESC LIMIT @limit OFFSET @offset`
+  ).all({ ...params, limit, offset })
+  return { rows, total, page: Number(page), limit, pages: Math.ceil(total / limit) || 1 }
+}
+
+function getMonthlySummary(months = 6) {
+  const d = new Date()
+  d.setDate(1)
+  d.setMonth(d.getMonth() - (months - 1))
+  const fromStr = d.toISOString().slice(0, 10)
+
+  const rows = db.prepare(`
+    SELECT strftime('%Y-%m', created_at) as month, type, SUM(amount) as total
+    FROM transactions
+    WHERE date(created_at) >= ?
+    GROUP BY month, type
+    ORDER BY month ASC
+  `).all(fromStr)
+
+  const result = []
+  for (let i = months - 1; i >= 0; i--) {
+    const cur = new Date()
+    cur.setDate(1)
+    cur.setMonth(cur.getMonth() - i)
+    const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`
+    const income  = rows.find(r => r.month === key && r.type === 'income' )?.total || 0
+    const expense = rows.find(r => r.month === key && r.type === 'expense')?.total || 0
+    result.push({ month: key, income: Math.round(income * 100) / 100, expense: Math.round(expense * 100) / 100 })
+  }
+  return result
+}
+
+function getFinancialSummary({ from = '', to = '' } = {}) {
+  const where  = []
+  const params = {}
+  if (from) { where.push("date(created_at) >= @from"); params.from = from }
+  if (to)   { where.push("date(created_at) <= @to");   params.to   = to }
+  const wc   = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const rows = db.prepare(
+    `SELECT type, platform, SUM(amount) as total FROM transactions ${wc} GROUP BY type, platform`
+  ).all(params)
+
+  let incomeTotal = 0, expenseTotal = 0
+  const byPlatform = {}
+  rows.forEach(r => {
+    if (!byPlatform[r.platform]) byPlatform[r.platform] = { platform: r.platform, income: 0, expense: 0 }
+    if (r.type === 'income') {
+      incomeTotal += r.total
+      byPlatform[r.platform].income += r.total
+    } else {
+      expenseTotal += r.total
+      byPlatform[r.platform].expense += r.total
+    }
+  })
+
+  const round = (n) => Math.round(n * 100) / 100
+  return {
+    income_total:  round(incomeTotal),
+    expense_total: round(expenseTotal),
+    net_profit:    round(incomeTotal - expenseTotal),
+    by_platform:   Object.values(byPlatform)
+      .map(p => ({ ...p, income: round(p.income), expense: round(p.expense), profit: round(p.income - p.expense) }))
+      .sort((a, b) => b.income - a.income),
+    period: { from, to },
+  }
+}
+
+// ── Reports ──────────────────────────────────────────────────────────
+function getTransactionsAll({ from = '', to = '', type = '', platform = '' } = {}) {
+  const where  = []
+  const params = {}
+  if (from)     { where.push("date(created_at) >= @from"); params.from     = from }
+  if (to)       { where.push("date(created_at) <= @to");   params.to       = to }
+  if (type)     { where.push('type = @type');               params.type     = type }
+  if (platform) { where.push('platform = @platform');       params.platform = platform }
+  const wc   = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const stmt = db.prepare(`SELECT * FROM transactions ${wc} ORDER BY created_at DESC`)
+  return Object.keys(params).length ? stmt.all(params) : stmt.all()
+}
+
+function getSubscriptionsReport({ platforms = null, status = '' } = {}) {
+  if (platforms !== null && platforms.length === 0) return []
+  const rows = db.prepare(`
+    SELECT p.id, p.number, p.client_name, p.phone, p.expiry_date,
+           a.platform, a.email
+    FROM profiles p
+    JOIN accounts a ON p.account_id = a.id
+    WHERE p.client_name != ''
+    ORDER BY a.platform ASC, p.expiry_date ASC
+  `).all()
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  return rows
+    .filter(r => !platforms || platforms.includes(r.platform))
+    .map(r => {
+      let rowStatus = 'active'
+      let daysRemaining = null
+      if (r.expiry_date) {
+        const [y, m, d] = r.expiry_date.split('-').map(Number)
+        const exp = new Date(y, m - 1, d)
+        daysRemaining = Math.round((exp - today) / 86400000)
+        if      (daysRemaining < 0)   rowStatus = 'expired'
+        else if (daysRemaining === 0) rowStatus = 'today'
+        else if (daysRemaining <= 2)  rowStatus = 'soon'
+        else                          rowStatus = 'active'
+      }
+      return { ...r, status: rowStatus, days_remaining: daysRemaining }
+    })
+    .filter(r => !status || r.status === status)
+}
+
 module.exports = {
   getAllAccounts, getAccountById, createAccount, updateAccount, deleteAccount,
   addProfile, deleteProfile,
@@ -378,5 +662,10 @@ module.exports = {
   getAllSuppliers, createSupplier, updateSupplier, deleteSupplier,
   getSavedClients, saveClient, deleteClient,
   getUserByUsername, createUser, getAllUsers, updateUser, deleteUser,
+  logAction, getAuditLog, purgeAuditLog,
+  getProfileWithAccount, getSavedClientById, getSupplierById, getUserById,
+  getPlatformPrices, getPlatformPrice, updatePlatformPrice,
+  createTransaction, getTransactions, getFinancialSummary, getMonthlySummary,
+  getTransactionsAll, getSubscriptionsReport,
   seedIfEmpty,
 }

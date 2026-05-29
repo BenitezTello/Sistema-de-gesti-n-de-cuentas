@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import Login from './components/Login'
-import { LayoutDashboard, Tv, MonitorPlay, MessageSquare, Truck, Users, UserCog, Shield, Menu, X, LogOut, Bell } from 'lucide-react'
+import { LayoutDashboard, Tv, MonitorPlay, MessageSquare, Truck, Users, UserCog, Shield, Menu, X, LogOut, Bell, ClipboardList, Wallet, FileText } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { AppProvider, useApp } from './context/AppContext'
@@ -11,6 +11,9 @@ import WhatsAppView from './components/WhatsAppView'
 import SuppliersView from './components/SuppliersView'
 import ClientsView from './components/ClientsView'
 import UsersView from './components/UsersView'
+import AuditView from './components/AuditView'
+import PaymentsView from './components/PaymentsView'
+import ReportsView from './components/ReportsView'
 import ToastContainer from './components/Toast'
 
 const BASE_NAV = [
@@ -19,8 +22,11 @@ const BASE_NAV = [
   { id: 'accounts-list', icon: Tv,               label: 'Cuentas',    adminOnly: false },
   { id: 'clients',       icon: Users,            label: 'Clientes',   adminOnly: false },
   { id: 'whatsapp',      icon: MessageSquare,    label: 'Cobros WA',  adminOnly: false },
+  { id: 'payments',      icon: Wallet,           label: 'Pagos',      adminOnly: false },
+  { id: 'reports',       icon: FileText,         label: 'Reportes',   adminOnly: false },
   { id: 'suppliers',     icon: Truck,            label: 'Proveedores',adminOnly: true  },
   { id: 'users',         icon: UserCog,          label: 'Usuarios',   adminOnly: true  },
+  { id: 'audit',         icon: ClipboardList,    label: 'Auditoría',  adminOnly: true  },
 ]
 
 const PAGE_TITLES = {
@@ -29,8 +35,11 @@ const PAGE_TITLES = {
   'accounts-list': { title: 'Cuentas' },
   clients:         { title: 'Clientes' },
   whatsapp:        { title: 'Cobros WA' },
+  payments:        { title: 'Pagos' },
+  reports:         { title: 'Reportes' },
   suppliers:       { title: 'Proveedores' },
   users:           { title: 'Usuarios' },
+  audit:           { title: 'Auditoría' },
 }
 
 function TopBar({ activeTab, onNavigate, onMenuOpen }) {
@@ -44,7 +53,7 @@ function TopBar({ activeTab, onNavigate, onMenuOpen }) {
 
   return (
     <header className="flex-shrink-0 flex items-center justify-between px-5 py-4 border-b border-white/[0.05]"
-      style={{ background: 'rgba(2,6,23,0.6)', backdropFilter: 'blur(8px)' }}>
+      style={{ background: 'rgba(4,9,5,0.75)', backdropFilter: 'blur(8px)' }}>
       <div className="flex items-center gap-3">
         {/* Mobile hamburger */}
         <button className="btn-icon md:hidden" onClick={onMenuOpen}>
@@ -159,8 +168,11 @@ function AppShell({ user, onLogout }) {
             {activeTab === 'accounts-list' && <AccountsListView />}
             {activeTab === 'clients'       && <ClientsView />}
             {activeTab === 'whatsapp'      && <WhatsAppView />}
+            {activeTab === 'payments'      && <PaymentsView />}
+            {activeTab === 'reports'       && <ReportsView />}
             {activeTab === 'suppliers'     && isAdmin && <SuppliersView />}
             {activeTab === 'users'         && isAdmin && <UsersView />}
+            {activeTab === 'audit'         && isAdmin && <AuditView />}
           </div>
         </main>
       </div>

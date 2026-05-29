@@ -25,6 +25,7 @@ function AccountCard({ account }) {
     getSubscriptionStatus, getSupplierName,
     suppliers, showToast,
     addProfile, deleteProfile, patchProfile,
+    getPlatformPrice,
   } = useApp()
 
   const [addingProfile,  setAddingProfile]  = useState(false)
@@ -508,12 +509,18 @@ function AccountCard({ account }) {
       {/* ── Modals ── */}
       <Modal isOpen={assignModal} onClose={() => setAssignModal(false)}
         title={`Asignar cliente → Perfil ${selProfile?.number}`}>
-        <AssignClientForm onSave={handleAssign} onClose={() => setAssignModal(false)} initialData={selProfile}/>
+        <AssignClientForm onSave={handleAssign} onClose={() => setAssignModal(false)}
+          initialData={selProfile}
+          platformName={account.platform}
+          platformPrice={getPlatformPrice(account.platform)}/>
       </Modal>
 
       <Modal isOpen={editModal} onClose={() => setEditModal(false)}
         title={`Editar cliente — Perfil ${selProfile?.number}`}>
-        <AssignClientForm onSave={handleEdit} onClose={() => setEditModal(false)} initialData={selProfile}/>
+        <AssignClientForm onSave={handleEdit} onClose={() => setEditModal(false)}
+          initialData={selProfile}
+          platformName={account.platform}
+          platformPrice={getPlatformPrice(account.platform)}/>
       </Modal>
 
       <Modal isOpen={passModal} onClose={() => setPassModal(false)} title="Actualizar contraseña">
