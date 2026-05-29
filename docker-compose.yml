@@ -12,8 +12,8 @@ services:
       - PORT=3000
       - WA_HOST=wa
       - WA_PORT=3001
-      - JWT_SECRET=REPLACED
-      - ENCRYPTION_KEY=REPLACED
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     volumes:
       - db_data:/app/server/data
     depends_on:

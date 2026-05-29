@@ -32,6 +32,7 @@ server/.wwebjs_auth/
 # Variables de entorno
 .env
 .env.*
+!.env.example
 
 # Claude Code memory (local al entorno)
 .claude/
