@@ -609,6 +609,59 @@ function getFinancialSummary({ from = '', to = '' } = {}) {
   }
 }
 
+// ── Clients Analytics ────────────────────────────────────────────────
+function getClientsAnalytics() {
+  const now       = new Date()
+  const thisMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`
+
+  // Primera transacción de cada cliente (para detectar "nuevo")
+  const firstTx = db.prepare(`
+    SELECT client_name, MIN(date(created_at)) as first_date
+    FROM transactions
+    WHERE type='income' AND client_name != ''
+    GROUP BY client_name
+  `).all()
+
+  const newThisMonth = firstTx.filter(r => r.first_date && r.first_date.startsWith(thisMonth)).length
+
+  // Por día de semana (0=Dom … 6=Sáb)
+  const wdRows = db.prepare(`
+    SELECT CAST(strftime('%w', created_at) AS INTEGER) as dow, COUNT(*) as count
+    FROM transactions
+    WHERE type='income' AND client_name != ''
+    GROUP BY dow ORDER BY dow
+  `).all()
+  const DAYS = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
+  const wdMap = {}
+  wdRows.forEach(r => { wdMap[r.dow] = r.count })
+  const byWeekday = DAYS.map((day, i) => ({ day, count: wdMap[i] || 0 }))
+
+  // Nuevos clientes por mes (últimos 6 meses)
+  const LABELS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+  const monthlyNew = []
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date()
+    d.setDate(1)
+    d.setMonth(d.getMonth() - i)
+    const key   = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
+    const count = firstTx.filter(r => r.first_date && r.first_date.startsWith(key)).length
+    monthlyNew.push({ month: key, label: LABELS[d.getMonth()], count })
+  }
+
+  // Top 10 clientes por número de transacciones
+  const topClients = db.prepare(`
+    SELECT client_name as name, client_phone as phone,
+           COUNT(*) as tx_count, ROUND(SUM(amount),2) as total
+    FROM transactions
+    WHERE type='income' AND client_name != ''
+    GROUP BY client_name
+    ORDER BY tx_count DESC
+    LIMIT 10
+  `).all()
+
+  return { newThisMonth, byWeekday, monthlyNew, topClients }
+}
+
 // ── Reports ──────────────────────────────────────────────────────────
 function getTransactionsAll({ from = '', to = '', type = '', platform = '' } = {}) {
   const where  = []
@@ -667,5 +720,6 @@ module.exports = {
   getPlatformPrices, getPlatformPrice, updatePlatformPrice,
   createTransaction, getTransactions, getFinancialSummary, getMonthlySummary,
   getTransactionsAll, getSubscriptionsReport,
+  getClientsAnalytics,
   seedIfEmpty,
 }

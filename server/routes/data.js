@@ -388,6 +388,11 @@ router.get('/reports/subscriptions', (req, res) => {
   res.json(rows)
 })
 
+// ── Clients Analytics ─────────────────────────────────────────────────
+router.get('/clients/analytics', (req, res) => {
+  res.json(db.getClientsAnalytics())
+})
+
 // ── Audit Log (solo admin) ────────────────────────────────────────────
 router.get('/audit', adminMiddleware, (req, res) => {
   const { page = 1, limit = 50, user = '', entity = '', from = '', to = '' } = req.query
