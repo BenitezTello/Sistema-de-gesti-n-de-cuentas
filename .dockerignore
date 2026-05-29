@@ -2,6 +2,7 @@ node_modules
 server/node_modules
 server/.wwebjs_auth
 server/data
+!server/data/streammanager.db
 dist
 .git
 .gitignore

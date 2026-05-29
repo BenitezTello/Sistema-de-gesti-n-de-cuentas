@@ -185,9 +185,30 @@ function AppShell({ user, onLogout }) {
 export default function App() {
   const [authUser, setAuthUser] = useState(null)
   const [authChecked, setAuthChecked] = useState(false)
+  const isDemoMode = import.meta.env.VITE_DEMO_MODE === 'true'
 
   useEffect(() => {
     const token = localStorage.getItem('token')
+
+    // Demo mode: auto-login con usuario demo si no hay token
+    if (!token && isDemoMode) {
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'demo', password: 'demo' }),
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.token) {
+            localStorage.setItem('token', d.token)
+            setAuthUser({ username: d.username, role: d.role || 'admin', permissions: d.permissions || ['all'] })
+          }
+        })
+        .catch(() => {})
+        .finally(() => setAuthChecked(true))
+      return
+    }
+
     if (!token) { setAuthChecked(true); return }
     fetch('/api/auth/verify', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
