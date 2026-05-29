@@ -23,16 +23,20 @@ dist-ssr
 *.sln
 *.sw?
 
-# Base de datos SQLite (datos reales, no van al repo)
+# Base de datos SQLite
+# En rama demo se incluye la BD ficticia para evaluación académica
 server/data/
+!server/data/streammanager.db
 
 # Sesión de WhatsApp (contiene credenciales)
 server/.wwebjs_auth/
 
 # Variables de entorno
+# En rama demo se incluye .env con credenciales ficticias
 .env
 .env.*
 !.env.example
+!.env
 
 # Claude Code memory (local al entorno)
 .claude/
