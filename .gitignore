@@ -40,3 +40,6 @@ server/.wwebjs_auth/
 # Documentos internos del proyecto
 PLAN_IMPLEMENTACION.md
 SISTEMA_DOCUMENTACION.md
+
+# Reportes de cobertura (generados)
+coverage/
