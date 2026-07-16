@@ -107,6 +107,28 @@ try {
 } catch (_) {}
 
 try {
+  db.exec("ALTER TABLE platform_prices ADD COLUMN renewal_price REAL DEFAULT 0")
+  db.exec("UPDATE platform_prices SET renewal_price = price WHERE renewal_price = 0")
+} catch (_) {}
+
+try {
+  db.exec("ALTER TABLE platform_prices ADD COLUMN reseller_price REAL DEFAULT 0")
+  db.exec("UPDATE platform_prices SET reseller_price = price WHERE reseller_price = 0")
+} catch (_) {}
+
+try { db.exec("ALTER TABLE profiles ADD COLUMN is_reseller INTEGER DEFAULT 0") } catch (_) {}
+try { db.exec("ALTER TABLE saved_clients ADD COLUMN is_reseller INTEGER DEFAULT 0") } catch (_) {}
+
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS combo_prices (
+    id         TEXT PRIMARY KEY,
+    platforms  TEXT UNIQUE NOT NULL,
+    price      REAL NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  )`)
+} catch (_) {}
+
+try {
   db.exec(`CREATE TABLE IF NOT EXISTS transactions (
     id           TEXT PRIMARY KEY,
     type         TEXT NOT NULL,
@@ -151,6 +173,7 @@ function mapProfile(p) {
     status:        p.status,
     expiryDate:    p.expiry_date,
     needsPinChange: p.needs_pin_change === 1,
+    isReseller:     p.is_reseller === 1,
   }
 }
 
@@ -274,6 +297,7 @@ function updateProfile(id, data) {
     status:        'status',
     expiryDate:    'expiry_date',
     needsPinChange:'needs_pin_change',
+    isReseller:    'is_reseller',
   }
   const sets   = []
   const params = { id }
@@ -384,9 +408,18 @@ function deleteClient(id) {
 function saveClient(name, phone) {
   if (!name?.trim()) return null
   const id = (phone || '').replace(/\D/g,'') || name.toLowerCase().trim()
-  db.prepare('INSERT OR REPLACE INTO saved_clients (id, name, phone) VALUES (?, ?, ?)')
+  db.prepare('INSERT OR IGNORE INTO saved_clients (id, name, phone) VALUES (?, ?, ?)')
     .run(id, name.trim(), phone || '')
+  db.prepare('UPDATE saved_clients SET name = ?, phone = ? WHERE id = ?')
+    .run(name.trim(), phone || '', id)
   return { id, name: name.trim(), phone: phone || '' }
+}
+
+function setClientResellerStatus(phone, name, isReseller) {
+  const id = (phone || '').replace(/\D/g,'') || name?.toLowerCase()?.trim()
+  if (!id) return
+  db.prepare('INSERT OR IGNORE INTO saved_clients (id, name, phone) VALUES (?, ?, ?)').run(id, name || '', phone || '')
+  db.prepare('UPDATE saved_clients SET is_reseller = ? WHERE id = ?').run(isReseller ? 1 : 0, id)
 }
 
 // ── Audit Log ────────────────────────────────────────────────────────────
@@ -498,6 +531,26 @@ function getPlatformPrice(platform) {
 
 function updatePlatformPrice(platform, price) {
   db.prepare("UPDATE platform_prices SET price = ?, updated_at = datetime('now') WHERE platform = ?")
+    .run(price, platform)
+}
+
+function getPlatformRenewalPrice(platform) {
+  const row = db.prepare('SELECT renewal_price FROM platform_prices WHERE platform = ?').get(platform)
+  return row ? (row.renewal_price ?? 0) : 0
+}
+
+function updatePlatformRenewalPrice(platform, price) {
+  db.prepare("UPDATE platform_prices SET renewal_price = ?, updated_at = datetime('now') WHERE platform = ?")
+    .run(price, platform)
+}
+
+function getPlatformResellerPrice(platform) {
+  const row = db.prepare('SELECT reseller_price FROM platform_prices WHERE platform = ?').get(platform)
+  return row ? (row.reseller_price ?? 0) : 0
+}
+
+function updatePlatformResellerPrice(platform, price) {
+  db.prepare("UPDATE platform_prices SET reseller_price = ?, updated_at = datetime('now') WHERE platform = ?")
     .run(price, platform)
 }
 
@@ -708,18 +761,43 @@ function getSubscriptionsReport({ platforms = null, status = '' } = {}) {
     .filter(r => !status || r.status === status)
 }
 
+// ── Combo Prices ─────────────────────────────────────────────────────────
+function normalizePlatforms(arr) {
+  return [...arr].sort().join('|')
+}
+function getComboPrices() {
+  return db.prepare('SELECT * FROM combo_prices ORDER BY platforms ASC').all()
+}
+function getComboPriceByPlatforms(platformsArray) {
+  const key = normalizePlatforms(platformsArray)
+  const row = db.prepare('SELECT price FROM combo_prices WHERE platforms = ?').get(key)
+  return row ? row.price : null
+}
+function upsertComboPrice(platformsArray, price) {
+  const key = normalizePlatforms(platformsArray)
+  const existing = db.prepare('SELECT id FROM combo_prices WHERE platforms = ?').get(key)
+  const cid = existing ? existing.id : Date.now().toString(36) + Math.random().toString(36).slice(2,6)
+  db.prepare("INSERT OR REPLACE INTO combo_prices (id, platforms, price, updated_at) VALUES (?, ?, ?, datetime('now'))")
+    .run(cid, key, price)
+  return { id: cid, platforms: key, price }
+}
+function deleteComboPrice(id) {
+  db.prepare('DELETE FROM combo_prices WHERE id = ?').run(id)
+}
+
 module.exports = {
   getAllAccounts, getAccountById, createAccount, updateAccount, deleteAccount,
   addProfile, deleteProfile,
   updateProfile, updateClientGlobal, extendClientAllProfiles,
   getAllSuppliers, createSupplier, updateSupplier, deleteSupplier,
-  getSavedClients, saveClient, deleteClient,
+  getSavedClients, saveClient, deleteClient, setClientResellerStatus,
   getUserByUsername, createUser, getAllUsers, updateUser, deleteUser,
   logAction, getAuditLog, purgeAuditLog,
   getProfileWithAccount, getSavedClientById, getSupplierById, getUserById,
-  getPlatformPrices, getPlatformPrice, updatePlatformPrice,
+  getPlatformPrices, getPlatformPrice, updatePlatformPrice, getPlatformRenewalPrice, updatePlatformRenewalPrice, getPlatformResellerPrice, updatePlatformResellerPrice,
   createTransaction, getTransactions, getFinancialSummary, getMonthlySummary,
   getTransactionsAll, getSubscriptionsReport,
+  getComboPrices, getComboPriceByPlatforms, upsertComboPrice, deleteComboPrice,
   getClientsAnalytics,
   seedIfEmpty,
 }

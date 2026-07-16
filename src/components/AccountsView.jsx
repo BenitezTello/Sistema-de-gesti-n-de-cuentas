@@ -25,7 +25,7 @@ function AccountCard({ account }) {
     getSubscriptionStatus, getSupplierName,
     suppliers, showToast,
     addProfile, deleteProfile, patchProfile,
-    getPlatformPrice,
+    getPlatformPrice, getPlatformResellerPrice,
   } = useApp()
 
   const [addingProfile,  setAddingProfile]  = useState(false)
@@ -59,7 +59,7 @@ function AccountCard({ account }) {
         `Tus datos de *${account.platform}*:\n` +
         `📧 Correo: ${account.email}\n` +
         `🔑 Contraseña: ${account.password}\n` +
-        (account.platform === 'Disney+' && account.access ? `🔑 Acceso: ${account.access}\n` : '') +
+        (['Disney+', 'HBO Max'].includes(account.platform) && account.access ? `🔑 Acceso: ${account.access}\n` : '') +
         `👤 Perfil ${profile.number} · PIN: *${profile.pin}*\n` +
         `📅 Vencimiento: ${profile.expiryDate}\n\n` +
         `¡Disfruta tu suscripción! 🚀`
@@ -238,7 +238,7 @@ function AccountCard({ account }) {
                 onClick={() => copyToClipboard(account.password,'Contraseña')}><Copy size={13}/></button>
             )}
           </div>
-          {account.platform === 'Disney+' && account.access && (
+          {['Disney+', 'HBO Max'].includes(account.platform) && account.access && (
             <div className="cred-row">
               <span className="cred-label">Acceso</span>
               <span className="cred-value revealed">{account.access}</span>
@@ -512,7 +512,8 @@ function AccountCard({ account }) {
         <AssignClientForm onSave={handleAssign} onClose={() => setAssignModal(false)}
           initialData={selProfile}
           platformName={account.platform}
-          platformPrice={getPlatformPrice(account.platform)}/>
+          platformPrice={getPlatformPrice(account.platform)}
+          platformResellerPrice={getPlatformResellerPrice(account.platform)}/>
       </Modal>
 
       <Modal isOpen={editModal} onClose={() => setEditModal(false)}
@@ -520,7 +521,8 @@ function AccountCard({ account }) {
         <AssignClientForm onSave={handleEdit} onClose={() => setEditModal(false)}
           initialData={selProfile}
           platformName={account.platform}
-          platformPrice={getPlatformPrice(account.platform)}/>
+          platformPrice={getPlatformPrice(account.platform)}
+          platformResellerPrice={getPlatformResellerPrice(account.platform)}/>
       </Modal>
 
       <Modal isOpen={passModal} onClose={() => setPassModal(false)} title="Actualizar contraseña">
@@ -594,8 +596,7 @@ export default function AccountsView() {
   const downCount = accounts.filter(a => a.isDown).length
 
   const filtered = accounts.filter(acc => {
-    if (showDown) return acc.isDown
-    if (acc.isDown) return false
+    if (showDown !== acc.isDown) return false
     const matchSearch = !search ||
       acc.platform.toLowerCase().includes(search.toLowerCase()) ||
       acc.email.toLowerCase().includes(search.toLowerCase()) ||

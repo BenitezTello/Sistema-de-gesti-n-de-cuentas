@@ -40,6 +40,7 @@ export const AppProvider = ({ children, user }) => {
   const [loading,         setLoading]         = useState(true)
   const [lastAssigned,    setLastAssigned]    = useState(null)
   const [platformPrices,  setPlatformPrices]  = useState([])
+  const [comboPrices,     setComboPrices]     = useState([])
   const [financialSummary,setFinancialSummary]= useState(null)
 
   // ── Cargar datos desde la API al montar ────────────────────────────
@@ -50,6 +51,7 @@ export const AppProvider = ({ children, user }) => {
       .finally(() => setLoading(false))
     api('/clients').then(c => setSavedClients(c || [])).catch(() => {})
     api('/platform-prices').then(p => setPlatformPrices(p || [])).catch(() => {})
+    api('/combo-prices').then(c => setComboPrices(c || [])).catch(() => {})
     if (user?.role === 'admin') {
       api('/users').then(u => setUsers(u || [])).catch(() => {})
     }
@@ -168,6 +170,16 @@ export const AppProvider = ({ children, user }) => {
     } catch {}
   }, [])
 
+  const setClientReseller = useCallback(async (phone, name, isReseller) => {
+    await api('/clients/reseller', 'POST', { phone, name, isReseller })
+    const id = (phone || '').replace(/\D/g,'') || name?.toLowerCase()?.trim()
+    setSavedClients(prev => {
+      const exists = prev.find(c => c.id === id)
+      if (exists) return prev.map(c => c.id === id ? { ...c, is_reseller: isReseller ? 1 : 0 } : c)
+      return [...prev, { id, name: name || '', phone: phone || '', is_reseller: isReseller ? 1 : 0 }]
+    })
+  }, [])
+
   const saveClientToHistory = useCallback(async (name, phone) => {
     if (!name?.trim()) return
     try {
@@ -198,12 +210,15 @@ export const AppProvider = ({ children, user }) => {
   }, [_patchProfile, showToast, accounts, saveClientToHistory])
 
   // Renueva la fecha del cliente de cuenta completa
-  const extendFullAccountClient = useCallback(async (accountId, newDateStr, label) => {
+  const extendFullAccountClient = useCallback(async (accountId, newDateStr, label, renewAmount = 0) => {
     const acc = accounts.find(a => a.id === accountId)
     if (!acc) return
     const newFullClient = { ...(acc.fullClient || {}), expiryDate: newDateStr }
-    await updateAccount(accountId, { fullClient: newFullClient })
-    showToast(`Renovado ${label} ✓`, 'success')
+    const payload = { fullClient: newFullClient }
+    if (renewAmount > 0) { payload.saleType = 'renewal'; payload.renewAmount = renewAmount }
+    await updateAccount(accountId, payload)
+    const msg = renewAmount > 0 ? `Renovado ${label} · ingreso registrado ✓` : `Renovado ${label} ✓`
+    showToast(msg, 'success')
   }, [accounts, updateAccount, showToast])
 
   // Libera cliente de cuenta completa
@@ -291,7 +306,27 @@ export const AppProvider = ({ children, user }) => {
   const updatePlatformPrice = useCallback(async (platform, price) => {
     await api(`/platform-prices/${encodeURIComponent(platform)}`, 'PUT', { price })
     setPlatformPrices(prev => prev.map(p => p.platform === platform ? { ...p, price } : p))
-    showToast(`Precio de ${platform} actualizado`, 'success')
+    showToast(`Precio venta de ${platform} actualizado`, 'success')
+  }, [showToast])
+
+  const getPlatformRenewalPrice = useCallback((platform) => {
+    return platformPrices.find(p => p.platform === platform)?.renewal_price ?? 0
+  }, [platformPrices])
+
+  const updatePlatformRenewalPrice = useCallback(async (platform, price) => {
+    await api(`/platform-prices/${encodeURIComponent(platform)}/renewal`, 'PUT', { price })
+    setPlatformPrices(prev => prev.map(p => p.platform === platform ? { ...p, renewal_price: price } : p))
+    showToast(`Precio renovación de ${platform} actualizado`, 'success')
+  }, [showToast])
+
+  const getPlatformResellerPrice = useCallback((platform) => {
+    return platformPrices.find(p => p.platform === platform)?.reseller_price ?? 0
+  }, [platformPrices])
+
+  const updatePlatformResellerPrice = useCallback(async (platform, price) => {
+    await api(`/platform-prices/${encodeURIComponent(platform)}/reseller`, 'PUT', { price })
+    setPlatformPrices(prev => prev.map(p => p.platform === platform ? { ...p, reseller_price: price } : p))
+    showToast(`Precio revendedor de ${platform} actualizado`, 'success')
   }, [showToast])
 
   // ── Financial Summary ──────────────────────────────────────────────
@@ -332,17 +367,64 @@ export const AppProvider = ({ children, user }) => {
     } catch { showToast('Error al eliminar proveedor', 'error') }
   }, [showToast])
 
+  // ── Combo Prices ───────────────────────────────────────────────────
+  const getComboPriceByPlatforms = useCallback((platformsArray) => {
+    const key = [...platformsArray].sort().join('|')
+    return comboPrices.find(c => c.platforms === key)?.price ?? null
+  }, [comboPrices])
+
+  const upsertComboPrice = useCallback(async (platforms, price) => {
+    const row = await api('/combo-prices', 'PUT', { platforms, price })
+    setComboPrices(prev => {
+      const exists = prev.find(c => c.id === row.id)
+      return exists ? prev.map(c => c.id === row.id ? row : c) : [...prev, row]
+    })
+    showToast('Precio de combo guardado', 'success')
+  }, [showToast])
+
+  const deleteComboPrice = useCallback(async (id) => {
+    await api(`/combo-prices/${id}`, 'DELETE')
+    setComboPrices(prev => prev.filter(c => c.id !== id))
+    showToast('Combo eliminado', 'info')
+  }, [showToast])
+
+  // Renueva todos los perfiles de un combo + registra UNA transacción
+  const renewCombo = useCallback(async (profiles, newDateStr, label, comboPrice, clientName, clientPhone, platform) => {
+    await Promise.all(profiles.map(p =>
+      p.isFullAccount
+        ? api(`/accounts/${p.accountId}`, 'PUT', { fullClient: { ...p.fullClientData, expiryDate: newDateStr } })
+        : api(`/profiles/${p.profileId}`, 'PUT', { expiryDate: newDateStr })
+    ))
+    if (comboPrice > 0) {
+      await api('/transactions/manual', 'POST', {
+        type: 'income', category: 'renewal',
+        platform, amount: comboPrice,
+        clientName, clientPhone,
+        notes: `Combo ${label}`,
+      })
+    }
+    const accs = await api('/accounts')
+    setAccounts(accs)
+    showToast(`Combo renovado ${label} · ingreso registrado ✓`, 'success')
+  }, [showToast])
+
   // ── Export Excel ───────────────────────────────────────────────────
   const exportToXLSX = useCallback(() => {
     const STATUS_LABEL = { active: 'Activo', today: 'Vence hoy', soon: 'Pronto', expired: 'Vencido', available: 'Disponible' }
     const rows = [['Plataforma','Correo','Perfil','PIN','Cliente','Celular','Vencimiento','Estado']]
     accounts.forEach(acc => {
-      acc.profiles.forEach(p => {
-        if (!p.clientName) return
-        const st = getSubscriptionStatus(p.expiryDate)
-        rows.push([acc.platform, acc.email, p.number, p.pin,
-          p.clientName, p.phone, p.expiryDate, STATUS_LABEL[st] || st])
-      })
+      if (acc.isFullAccount) {
+        const fc = acc.fullClient
+        if (!fc?.clientName) return
+        const st = getSubscriptionStatus(fc.expiryDate)
+        rows.push([acc.platform, acc.email, 'Completa', '—', fc.clientName, fc.phone || '', fc.expiryDate, STATUS_LABEL[st] || st])
+      } else {
+        acc.profiles.forEach(p => {
+          if (!p.clientName) return
+          const st = getSubscriptionStatus(p.expiryDate)
+          rows.push([acc.platform, acc.email, p.number, p.pin, p.clientName, p.phone, p.expiryDate, STATUS_LABEL[st] || st])
+        })
+      }
     })
     downloadXLSX(rows, 'Suscripciones', `suscripciones_${format(new Date(), 'yyyy-MM-dd')}.xlsx`)
     showToast('Excel exportado', 'success')
@@ -355,14 +437,15 @@ export const AppProvider = ({ children, user }) => {
       showToast, dismissToast, copyToClipboard,
       getSubscriptionStatus, getDaysRemaining, getSupplierName,
       addAccount, updateAccount, deleteAccount, markPasswordChanged, setFullAccount,
-      lastAssigned, savedClients, deleteClientFromHistory,
+      lastAssigned, savedClients, deleteClientFromHistory, setClientReseller,
       addProfile, deleteProfile, patchProfile: _patchProfile,
       assignClientToProfile, releaseProfile, releaseProfileWithPIN, releaseFullClient,
       extendProfile, extendFullAccountClient, extendAccount, extendClientAllProfiles,
       addSupplier, updateSupplier, deleteSupplier,
       updateClientGlobal, exportToXLSX,
       users, createAppUser, updateAppUser, deleteAppUser,
-      platformPrices, getPlatformPrice, updatePlatformPrice,
+      platformPrices, getPlatformPrice, updatePlatformPrice, getPlatformRenewalPrice, updatePlatformRenewalPrice, getPlatformResellerPrice, updatePlatformResellerPrice,
+      comboPrices, getComboPriceByPlatforms, upsertComboPrice, deleteComboPrice, renewCombo,
       financialSummary, loadFinancialSummary,
     }}>
       {children}

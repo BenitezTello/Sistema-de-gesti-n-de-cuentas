@@ -5,6 +5,7 @@ const path       = require('path')
 const http       = require('http')
 const db         = require('./db')
 const dataRoutes = require('./routes/data')
+const botRoutes  = require('./routes/bot')
 const { router: authRoutes, authMiddleware } = require('./auth')
 
 const app = express()
@@ -31,6 +32,16 @@ app.use('/api/auth', authRoutes)
 
 // ── Rutas de datos (protegidas) ───────────────────────────────────────
 app.use('/api/data', authMiddleware, dataRoutes)
+
+// ── Rutas del bot (autenticadas con clave compartida, no JWT) ─────────
+function botAuth(req, res, next) {
+  const key = req.headers['x-bot-key']
+  if (!process.env.BOT_API_KEY || key !== process.env.BOT_API_KEY) {
+    return res.status(401).json({ error: 'No autorizado' })
+  }
+  next()
+}
+app.use('/api/bot', botAuth, botRoutes)
 
 // ── Proxy a servidor WhatsApp (protegido) ─────────────────────────────
 const WA_HOST = process.env.WA_HOST || 'localhost'

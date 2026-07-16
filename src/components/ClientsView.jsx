@@ -49,7 +49,7 @@ function buildUniqueClients(accounts, savedClients, getSubscriptionStatus) {
   const map = new Map()
   ;(savedClients || []).forEach(c => {
     const key = normalizePhone(c.phone) || c.name.toLowerCase().trim()
-    if (!map.has(key)) map.set(key, { id: key, name: c.name, phone: c.phone || '', subs: [] })
+    if (!map.has(key)) map.set(key, { id: key, name: c.name, phone: c.phone || '', subs: [], isReseller: c.is_reseller === 1 })
   })
   accounts.forEach(acc => {
     acc.profiles.forEach(p => {
@@ -113,38 +113,53 @@ function ClientAnalytics({ accounts, allClients }) {
 
   const now = new Date(); now.setHours(0,0,0,0)
 
-  // Métricas de perfiles
-  const allOccupied = accounts.flatMap(a => a.profiles.filter(p => p.clientName))
+  // Métricas de perfiles (incluye cuentas completas)
+  const allOccupied = [
+    ...accounts.flatMap(a => a.profiles.filter(p => p.clientName)),
+    ...accounts.filter(a => a.isFullAccount && a.fullClient?.clientName)
+      .map(a => ({ expiryDate: a.fullClient.expiryDate || '', clientName: a.fullClient.clientName })),
+  ]
   const statuses    = allOccupied.map(p => getSubscriptionStatus(p.expiryDate))
-  const activeCount = statuses.filter(s => ['active','soon','today'].includes(s)).length
+  const activeCount = allOccupied.length
   const soonCount   = statuses.filter(s => ['today','soon'].includes(s)).length
   const expiredCount= statuses.filter(s => s === 'expired').length
 
-  // Distribución por plataforma
+  // Distribución por plataforma (incluye cuentas completas)
   const byPlatform = {}
   accounts.forEach(acc => {
-    const occ = acc.profiles.filter(p => p.clientName).length
-    if (occ > 0) byPlatform[acc.platform] = (byPlatform[acc.platform] || 0) + occ
+    if (acc.isFullAccount) {
+      if (acc.fullClient?.clientName) byPlatform[acc.platform] = (byPlatform[acc.platform] || 0) + 1
+    } else {
+      const occ = acc.profiles.filter(p => p.clientName).length
+      if (occ > 0) byPlatform[acc.platform] = (byPlatform[acc.platform] || 0) + occ
+    }
   })
   const platEntries = Object.entries(byPlatform).sort((a,b) => b[1]-a[1])
   const maxPlat     = Math.max(...platEntries.map(e => e[1]), 1)
 
   // Clientes en riesgo (vencen hoy o en ≤2 días)
-  const atRisk = accounts.flatMap(acc =>
-    acc.profiles
-      .filter(p => p.clientName && ['today','soon'].includes(getSubscriptionStatus(p.expiryDate)))
-      .map(p => ({ ...p, platform: acc.platform }))
-  ).sort((a,b) => (a.expiryDate||'').localeCompare(b.expiryDate||''))
+  const atRisk = [
+    ...accounts.flatMap(acc =>
+      acc.profiles.filter(p => p.clientName && ['today','soon'].includes(getSubscriptionStatus(p.expiryDate)))
+        .map(p => ({ ...p, platform: acc.platform }))),
+    ...accounts.filter(a => a.isFullAccount && a.fullClient?.clientName && ['today','soon'].includes(getSubscriptionStatus(a.fullClient.expiryDate)))
+      .map(a => ({ clientName: a.fullClient.clientName, phone: a.fullClient.phone, expiryDate: a.fullClient.expiryDate, platform: a.platform })),
+  ].sort((a,b) => (a.expiryDate||'').localeCompare(b.expiryDate||''))
 
   // Cancelaciones estimadas (vencidos >5 días sin renovar)
-  const lost = accounts.flatMap(acc =>
-    acc.profiles.filter(p => {
-      if (!p.clientName || !p.expiryDate) return false
-      const [y,m,d] = p.expiryDate.split('-').map(Number)
-      const exp = new Date(y, m-1, d)
-      return Math.round((now - exp) / 86400000) > 5
-    }).map(p => ({ ...p, platform: acc.platform }))
-  ).sort((a,b) => (a.expiryDate||'').localeCompare(b.expiryDate||''))
+  const lost = [
+    ...accounts.flatMap(acc =>
+      acc.profiles.filter(p => {
+        if (!p.clientName || !p.expiryDate) return false
+        const [y,m,d] = p.expiryDate.split('-').map(Number)
+        return Math.round((now - new Date(y,m-1,d)) / 86400000) > 5
+      }).map(p => ({ ...p, platform: acc.platform }))),
+    ...accounts.filter(a => {
+      if (!a.isFullAccount || !a.fullClient?.clientName || !a.fullClient?.expiryDate) return false
+      const [y,m,d] = a.fullClient.expiryDate.split('-').map(Number)
+      return Math.round((now - new Date(y,m-1,d)) / 86400000) > 5
+    }).map(a => ({ clientName: a.fullClient.clientName, phone: a.fullClient.phone, expiryDate: a.fullClient.expiryDate, platform: a.platform })),
+  ].sort((a,b) => (a.expiryDate||'').localeCompare(b.expiryDate||''))
 
   // Chart helpers
   const wdMax   = analytics ? Math.max(...analytics.byWeekday.map(d => d.count), 1) : 1
@@ -157,7 +172,7 @@ function ClientAnalytics({ accounts, allClients }) {
       {/* ── Tarjetas resumen ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label:'Clientes activos',     value: activeCount,                    color:'#4ade80', icon: Users },
+          { label:'Suscripciones activas', value: activeCount,                    color:'#4ade80', icon: Users },
           { label:'Nuevos este mes',       value: analytics?.newThisMonth ?? '…', color:'#60a5fa', icon: TrendingUp },
           { label:'Por vencer (≤2 días)',  value: soonCount,                      color:'#fbbf24', icon: AlertTriangle },
           { label:'Cancelaciones est.',    value: expiredCount,                   color:'#f87171', icon: UserMinus },
@@ -491,7 +506,7 @@ function RenewButton({ client }) {
 }
 
 // ── Client row ─────────────────────────────────────────────────────────
-function ClientRow({ client, idx, onEdit, onDelete }) {
+function ClientRow({ client, idx, onEdit, onDelete, onToggleReseller }) {
   const cfg              = STATUS_CFG[client.worstStatus] || STATUS_CFG.active
   const waPhone          = normalizePhone(client.phone)
   const uniquePlatforms  = [...new Set(client.subs.map(s => s.platform))]
@@ -523,6 +538,12 @@ function ClientRow({ client, idx, onEdit, onDelete }) {
               <Layers size={9}/> COMBO
             </span>
           )}
+          {client.isReseller && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold"
+              style={{background:'rgba(251,146,60,0.15)',color:'#fb923c',border:'1px solid rgba(251,146,60,0.3)'}}>
+              REVENDEDOR
+            </span>
+          )}
           {client.isFromDownAccount && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold"
               style={{background:'rgba(239,68,68,0.12)',color:'#f87171',border:'1px solid rgba(239,68,68,0.3)'}}>
@@ -552,6 +573,15 @@ function ClientRow({ client, idx, onEdit, onDelete }) {
       </td>
       <td>
         <div className="flex items-center justify-end gap-1">
+          <button
+            title={client.isReseller ? 'Quitar revendedor' : 'Marcar como revendedor'}
+            onClick={() => onToggleReseller(client)}
+            className="btn-icon text-[10px] font-bold transition-all"
+            style={client.isReseller
+              ? { background:'rgba(251,146,60,0.2)', color:'#fb923c', border:'1px solid rgba(251,146,60,0.4)', width:'1.75rem', height:'1.75rem' }
+              : { background:'rgba(255,255,255,0.04)', color:'#475569', border:'1px solid rgba(255,255,255,0.08)', width:'1.75rem', height:'1.75rem' }}>
+            R
+          </button>
           <RenewButton client={client}/>
           <button className="btn-icon btn-icon-indigo" title="Editar cliente" onClick={() => onEdit(client)}><Edit2 size={14}/></button>
           <button className="btn-icon btn-icon-danger" title="Eliminar del historial" onClick={() => onDelete(client)}><Trash2 size={14}/></button>
@@ -570,7 +600,7 @@ function ClientRow({ client, idx, onEdit, onDelete }) {
 
 // ── Main view ──────────────────────────────────────────────────────────
 export default function ClientsView() {
-  const { accounts, savedClients, getSubscriptionStatus, updateClientGlobal, deleteClientFromHistory } = useApp()
+  const { accounts, savedClients, getSubscriptionStatus, updateClientGlobal, deleteClientFromHistory, setClientReseller } = useApp()
   const [view,         setView]         = useState('analytics')
   const [search,       setSearch]       = useState('')
   const [sortBy,       setSortBy]       = useState('expiry')
@@ -624,6 +654,7 @@ export default function ClientsView() {
     setEditTarget(null)
   }
   const handleDelete = () => { deleteClientFromHistory(delTarget.id); setDelTarget(null) }
+  const handleToggleReseller = (client) => setClientReseller(client.phone, client.name, !client.isReseller)
 
   const SORT_OPTS = [
     { value:'expiry', label:'Vencimiento ↑' },
@@ -718,7 +749,7 @@ export default function ClientsView() {
                 <tbody>
                   {paged.map((client, idx) => (
                     <ClientRow key={client.id} client={client} idx={idx}
-                      onEdit={setEditTarget} onDelete={setDelTarget}/>
+                      onEdit={setEditTarget} onDelete={setDelTarget} onToggleReseller={handleToggleReseller}/>
                   ))}
                   {paged.length === 0 && (
                     <tr><td colSpan={5} className="text-center py-14 text-slate-600 text-sm">

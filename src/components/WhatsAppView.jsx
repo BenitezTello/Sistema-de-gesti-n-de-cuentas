@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { addMonths, addDays, format } from 'date-fns'
 import {
   MessageSquare, Send, CheckCircle, Clock, AlertCircle,
   Copy, Info, ChevronDown, ChevronUp,
-  Loader2, AlertTriangle, RefreshCw, Tv, Users, Search, X, Eye, EyeOff
+  Loader2, AlertTriangle, RefreshCw, Tv, Users, Search, X, Eye, EyeOff, Layers
 } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import { useWAEvents } from '../hooks/useWAEvents'
@@ -28,14 +28,16 @@ function relativeDateText(dateStr) {
 
 /* ── Templates ─────────────────────────────────────────────────────── */
 const DEFAULT_TEMPLATES = {
-  expired: `Hola *{{nombre}}*! ⚠️ Tu perfil de *{{plataforma}}* venció {{fecha}}. Si deseas renovar, escríbenos. 🎬`,
-  today:   `¡Hola *{{nombre}}*! 🚀 Tu suscripción de *{{plataforma}}* vence *{{fecha}}*. Envíanos el comprobante para renovar. 🙏`,
-  soon:    `Hola *{{nombre}}*! 👋 Tu perfil de *{{plataforma}}* vence *{{fecha}}*. ¿Deseas renovar? 😊`,
+  expired:  `Hola *{{nombre}}*! ⚠️ Tu perfil de *{{plataforma}}* venció {{fecha}}. Si deseas renovar, escríbenos. 🎬`,
+  today:    `¡Hola *{{nombre}}*! 🚀 Tu suscripción de *{{plataforma}}* vence *{{fecha}}*. Envíanos el comprobante para renovar. 🙏`,
+  soon:     `Hola *{{nombre}}*! 👋 Tu perfil de *{{plataforma}}* vence *{{fecha}}*. ¿Deseas renovar? 😊`,
+  reseller: `Hola *{{nombre}}*! 👋 Tu cuenta de *{{plataforma}}* ({{correo}}) vence *{{fecha}}*. ¿Deseas renovar? 🙏`,
 }
 function fillTemplate(t, sub) {
   return t
     .replace(/{{nombre}}/g,     sub.clientName || '')
     .replace(/{{plataforma}}/g, sub.platform   || '')
+    .replace(/{{correo}}/g,     sub.email      || '')
     .replace(/{{fecha}}/g,      relativeDateText(sub.expiryDate))
 }
 
@@ -283,6 +285,7 @@ function ClientItem({ sub, template, status, onCopyMsg, onRenew, onRelease, onRe
           <div className="flex items-center gap-2 flex-wrap">
             <p className="font-semibold text-slate-200 text-sm">{sub.clientName}</p>
             <span className={`badge ${cfg.badge}`}>{cfg.label}</span>
+            {sub.isReseller && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background:'rgba(251,146,60,0.15)', color:'#fb923c', border:'1px solid rgba(251,146,60,0.3)' }}>REVENDEDOR</span>}
           </div>
           <div className="flex items-center gap-2 flex-wrap mt-0.5">
             <span className={`inline-flex px-2 py-0.5 rounded text-[11px] font-bold ${platClass}`}>{sub.platform}</span>
@@ -300,10 +303,10 @@ function ClientItem({ sub, template, status, onCopyMsg, onRenew, onRelease, onRe
             <Copy size={15}/>
           </button>
           {waHref && (
-            <a href={waHref} target="_blank" rel="noopener noreferrer"
-              className="btn-icon btn-icon-wa" title="Abrir WhatsApp">
+            <button className="btn-icon btn-icon-wa" title="Abrir WhatsApp"
+              onClick={() => window.open(waHref, '_blank', 'noopener,noreferrer')}>
               <MessageSquare size={15}/>
-            </a>
+            </button>
           )}
         </div>
       </div>
@@ -480,13 +483,277 @@ function AccountItem({ account, supplier, status, onRenew }) {
   )
 }
 
+/* ── Combo Client Item ──────────────────────────────────────────────── */
+function ComboRenewButton({ name, currentExpiry, comboPrice, sumPrice, platforms, onApply }) {
+  const [open,    setOpen]    = useState(false)
+  const [amount,  setAmount]  = useState(comboPrice ?? sumPrice)
+  const [pending, setPending] = useState(null)
+  const [pos,     setPos]     = useState({ top:0, right:0 })
+  const btnRef = useRef(null)
+  const noComboConfig = comboPrice === null
+
+  const base = parseLocal(currentExpiry)
+
+  const calcPos = () => {
+    if (!btnRef.current) return
+    const r = btnRef.current.getBoundingClientRect()
+    const pw = 260
+    const top = Math.min(r.bottom + 6, window.innerHeight - 340)
+    const isMobile = window.innerWidth < 640
+    if (isMobile) setPos({ top, left: Math.max(8, (window.innerWidth - pw) / 2), right: undefined })
+    else setPos({ top, right: Math.max(8, window.innerWidth - r.right), left: undefined })
+  }
+
+  const openPopover = () => { calcPos(); setOpen(v => !v) }
+
+  useEffect(() => {
+    if (!open) return
+    window.addEventListener('scroll', calcPos, true)
+    window.addEventListener('resize', calcPos)
+    return () => { window.removeEventListener('scroll', calcPos, true); window.removeEventListener('resize', calcPos) }
+  }, [open])
+
+  const select = (newDate, label) => setPending({ newDateStr: format(newDate, 'yyyy-MM-dd'), label })
+  const confirm = () => { onApply(pending.newDateStr, pending.label, Number(amount) || 0); setOpen(false); setPending(null) }
+  const cancel = () => setPending(null)
+  const close = () => { setOpen(false); setPending(null) }
+
+  const popup = (
+    <>
+      <div className="fixed inset-0 z-[998]" onClick={close}/>
+      <div style={{ position:'fixed', top:pos.top, right:pos.right, left:pos.left, zIndex:999, minWidth:'240px', maxWidth:'92vw',
+        background:'#111827', borderRadius:'0.75rem', border:'1px solid rgba(255,255,255,0.1)', boxShadow:'0 20px 60px rgba(0,0,0,0.6)', overflow:'hidden' }}>
+        {pending ? (
+          <div className="p-3 space-y-3">
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Confirmar renovación combo</p>
+            <div className="p-3 rounded-xl text-center" style={{ background:'rgba(16,185,129,0.08)', border:'1px solid rgba(16,185,129,0.2)' }}>
+              <p className="text-xs text-slate-400">{name} · {platforms.join(' + ')}</p>
+              <p className="text-sm font-bold text-slate-200 mt-1">{pending.label}</p>
+              <p className="text-lg font-bold text-emerald-400 mt-0.5 font-mono">{toShort(pending.newDateStr)}</p>
+              <p className="text-emerald-400 font-bold mt-1">S/. {Number(amount).toFixed(2)}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-slate-500 mb-1">Monto a cobrar (S/.)</p>
+              <input type="number" min="0" step="0.5" className="form-input !py-1 !text-xs w-full"
+                value={amount} onChange={e => setAmount(e.target.value)}/>
+            </div>
+            <div className="flex gap-1.5">
+              <button className="btn-secondary flex-1 !py-1.5 !text-xs" onClick={cancel}>← Volver</button>
+              <button className="btn-primary flex-1 !py-1.5 !text-xs" onClick={confirm}
+                style={{ background:'linear-gradient(135deg,#059669,#10b981)' }}>✓ Confirmar</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="px-3 pt-2.5 pb-1">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest truncate">Renovar combo · {name}</p>
+              {noComboConfig && (
+                <p className="text-[10px] text-amber-400 mt-1">⚠ Sin precio de combo — usando suma individual</p>
+              )}
+            </div>
+            {QUICK_OPTIONS.map(opt => {
+              const newDate = opt.getDate(base)
+              return (
+                <button key={opt.label} className="w-full text-left px-3 py-2 text-sm text-slate-300 hover:bg-white/[0.07] transition-colors flex items-center justify-between"
+                  onClick={() => select(newDate, opt.label)}>
+                  <span>{opt.label}</span>
+                  <span className="text-xs text-emerald-500 font-mono">{toShort(format(newDate, 'yyyy-MM-dd'))}</span>
+                </button>
+              )
+            })}
+          </>
+        )}
+      </div>
+    </>
+  )
+
+  return (
+    <>
+      <button ref={btnRef} className="btn-icon btn-icon-success" title="Renovar combo" onClick={openPopover}>
+        <RefreshCw size={15}/>
+      </button>
+      {open && createPortal(popup, document.body)}
+    </>
+  )
+}
+
+function ComboClientItem({ combo, onRenewCombo, onCopyMsg, onRelease, onReleaseFull }) {
+  const [expanded,    setExpanded]    = useState(false)
+  const [showPass,    setShowPass]    = useState({})
+  const [releaseStep, setReleaseStep] = useState({})
+  const [newPins,     setNewPins]     = useState({})
+
+  const cfg      = STATUS_CFG[combo.status] || STATUS_CFG.soon
+  const phone    = combo.phone?.replace(/\D/g,'')
+  const comboMsg = combo.platforms.map(p => `🎬 *${p}* vence ${relativeDateText(combo.expiryDate)}`).join('\n')
+  const waHref   = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(`Hola *${combo.clientName}*! 👋\n${comboMsg}\nSi deseas renovar, escríbenos. 🙏`)}` : null
+
+  const handleRelease = (profile) => {
+    setNewPins(p => ({ ...p, [profile.profileId]: profile.pin || '' }))
+    setReleaseStep(p => ({ ...p, [profile.profileId]: 'pin' }))
+  }
+  const handleConfirm = async (profile) => {
+    if (profile.isFullAccount) await onReleaseFull(profile.accountId)
+    else await onRelease(profile.accountId, profile.profileId, newPins[profile.profileId] || profile.pin)
+    setReleaseStep(p => ({ ...p, [profile.profileId]: undefined }))
+  }
+  const handleCancel = (id) => setReleaseStep(p => ({ ...p, [id]: undefined }))
+
+  return (
+    <div className="wa-item flex-col !items-stretch gap-0 !p-0 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-white/[0.02] transition-colors"
+        onClick={() => setExpanded(v => !v)}>
+        <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
+          combo.status==='expired'?'bg-red-500/12 text-red-400':combo.status==='today'?'bg-amber-500/12 text-amber-400':'bg-yellow-500/12 text-yellow-400'}`}>
+          <cfg.Icon size={16}/>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="font-semibold text-slate-200 text-sm">{combo.clientName}</p>
+            <span className={`badge ${cfg.badge}`}>{cfg.label}</span>
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold"
+              style={{background:'rgba(139,92,246,0.15)',color:'#c084fc',border:'1px solid rgba(139,92,246,0.3)'}}>
+              <Layers size={9}/> COMBO
+            </span>
+            {combo.noComboPrice && <span className="text-[10px] text-amber-400/70">sin precio</span>}
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+            {combo.platforms.map(p => (
+              <span key={p} className={`inline-flex px-2 py-0.5 rounded text-[11px] font-bold ${PLATFORM_CLASS[p] || 'plat-default'}`}>{p}</span>
+            ))}
+            <span className="text-xs text-slate-500">{combo.expiryDate}</span>
+            {combo.phone && <span className="text-xs font-mono text-slate-600">{combo.phone}</span>}
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+          <ComboRenewButton
+            name={combo.clientName}
+            currentExpiry={combo.expiryDate}
+            comboPrice={combo.comboPrice}
+            sumPrice={combo.sumPrice}
+            platforms={combo.platforms}
+            onApply={(newDateStr, label, amount) => onRenewCombo(combo, newDateStr, label, amount)}
+          />
+          <button className="btn-icon btn-icon-indigo" title="Copiar mensaje" onClick={() => onCopyMsg(comboMsg)}>
+            <Copy size={15}/>
+          </button>
+          {waHref && (
+            <button className="btn-icon btn-icon-wa" title="Abrir WhatsApp"
+              onClick={() => window.open(waHref, '_blank', 'noopener,noreferrer')}>
+              <MessageSquare size={15}/>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Panel expandido: credenciales y liberar por plataforma */}
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height:0, opacity:0 }} animate={{ height:'auto', opacity:1 }}
+            exit={{ height:0, opacity:0 }} transition={{ duration:0.2 }}
+            className="overflow-hidden border-t border-white/[0.06]"
+            style={{ background:'rgba(0,0,0,0.25)' }}>
+            <div className="px-4 py-3 space-y-4">
+              {combo.profiles.map(profile => {
+                const step = releaseStep[profile.profileId]
+                return (
+                  <div key={profile.profileId} className="space-y-2 pb-3 border-b border-white/[0.04] last:border-0 last:pb-0">
+                    <span className={`inline-flex px-2 py-0.5 rounded text-[11px] font-bold ${PLATFORM_CLASS[profile.platform] || 'plat-default'}`}>
+                      {profile.platform}
+                    </span>
+                    {/* Email */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-600 uppercase w-16">Correo</span>
+                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{profile.email}</span>
+                      <button className="btn-icon btn-icon-indigo" style={{width:'1.5rem',height:'1.5rem'}}
+                        onClick={() => navigator.clipboard.writeText(profile.email)}><Copy size={11}/></button>
+                    </div>
+                    {/* Clave */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-600 uppercase w-16">Clave</span>
+                      <span className="text-xs font-mono text-slate-300 flex-1">
+                        {showPass[profile.profileId] ? profile.password : '••••••••'}
+                      </span>
+                      <button className="btn-icon" style={{width:'1.5rem',height:'1.5rem',color:'#475569'}}
+                        onClick={() => setShowPass(p => ({ ...p, [profile.profileId]: !p[profile.profileId] }))}>
+                        {showPass[profile.profileId] ? <EyeOff size={11}/> : <Eye size={11}/>}
+                      </button>
+                      <button className="btn-icon btn-icon-indigo" style={{width:'1.5rem',height:'1.5rem'}}
+                        onClick={() => navigator.clipboard.writeText(profile.password)}><Copy size={11}/></button>
+                    </div>
+                    {/* PIN (solo perfiles normales) */}
+                    {!profile.isFullAccount && profile.number && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold text-slate-600 uppercase w-16">Perfil</span>
+                        <span className="text-xs text-slate-300">
+                          P{profile.number} · PIN: <span className="font-mono font-bold">{profile.pin}</span>
+                        </span>
+                        <button className="btn-icon btn-icon-indigo" style={{width:'1.5rem',height:'1.5rem'}}
+                          onClick={() => navigator.clipboard.writeText(profile.pin)}><Copy size={11}/></button>
+                      </div>
+                    )}
+                    {/* Liberar */}
+                    <div className="pt-0.5 space-y-2">
+                      {!step && (
+                        <button onClick={() => handleRelease(profile)}
+                          className="w-full py-1.5 rounded-lg text-xs font-bold transition-all"
+                          style={{ background:'rgba(255,255,255,0.04)', color:'#64748b', border:'1px solid rgba(255,255,255,0.08)' }}>
+                          {profile.isFullAccount ? 'Liberar cliente (no renovó)' : 'Liberar perfil (no renovó)'}
+                        </button>
+                      )}
+                      {step === 'pin' && !profile.isFullAccount && (
+                        <div className="space-y-2">
+                          <p className="text-[11px] text-slate-500">Nuevo PIN para el perfil liberado:</p>
+                          <div className="flex items-center gap-2">
+                            <input className="form-input !py-1.5 !px-3 text-sm font-mono flex-1"
+                              placeholder="Nuevo PIN" maxLength={6} autoFocus
+                              value={newPins[profile.profileId] || ''}
+                              onChange={e => setNewPins(p => ({ ...p, [profile.profileId]: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') handleConfirm(profile) }}/>
+                            <button onClick={() => handleConfirm(profile)}
+                              className="btn-primary !py-1.5 !px-3 !text-xs whitespace-nowrap"
+                              style={{ background:'linear-gradient(135deg,#dc2626,#ef4444)' }}>Liberar</button>
+                            <button onClick={() => handleCancel(profile.profileId)}
+                              className="btn-secondary !py-1.5 !px-3 !text-xs">Cancelar</button>
+                          </div>
+                        </div>
+                      )}
+                      {step === 'pin' && profile.isFullAccount && (
+                        <div className="flex gap-2">
+                          <button onClick={() => handleConfirm(profile)}
+                            className="btn-primary flex-1 !py-1.5 !text-xs"
+                            style={{ background:'linear-gradient(135deg,#dc2626,#ef4444)' }}>Confirmar liberación</button>
+                          <button onClick={() => handleCancel(profile.profileId)}
+                            className="btn-secondary !py-1.5 !text-xs">Cancelar</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 /* ── Main view ─────────────────────────────────────────────────────── */
 export default function WhatsAppView() {
   const {
-    accounts, suppliers,
-    getSubscriptionStatus, copyToClipboard,
-    extendProfile, extendFullAccountClient, extendAccount, releaseProfileWithPIN, releaseFullClient,
+    accounts, suppliers, savedClients,
+    getSubscriptionStatus, copyToClipboard, getPlatformRenewalPrice, getPlatformResellerPrice,
+    getComboPriceByPlatforms,
+    extendProfile, extendFullAccountClient, extendAccount, releaseProfileWithPIN, releaseFullClient, renewCombo,
   } = useApp()
+
+  const isClientReseller = useCallback((phone) => {
+    const norm = (phone || '').replace(/\D/g,'')
+    if (!norm) return false
+    return (savedClients || []).some(c => c.id === norm && c.is_reseller === 1)
+  }, [savedClients])
   const { status, qr, progress, bulkDone, isSending, backendOk, connect, disconnect, sendBulk, resetDone } = useWAEvents()
 
   const [mainTab,       setMainTab]       = useState('clients')
@@ -502,7 +769,7 @@ export default function WhatsAppView() {
     // Perfiles normales con cliente asignado
     ...accounts.flatMap(acc =>
       acc.profiles.filter(p => p.clientName)
-        .map(p => ({ ...p, platform: acc.platform, accountId: acc.id, email: acc.email, password: acc.password, isFullAccount: false }))
+        .map(p => ({ ...p, platform: acc.platform, accountId: acc.id, email: acc.email, password: acc.password, isFullAccount: false, isReseller: isClientReseller(p.phone) }))
     ),
     // Cuentas completas con cliente asignado
     ...accounts
@@ -519,6 +786,7 @@ export default function WhatsAppView() {
         email:         acc.email,
         password:      acc.password,
         isFullAccount: true,
+        isReseller:    isClientReseller(acc.fullClient.phone),
       })),
   ].filter(s => ['expired','today','soon'].includes(getSubscriptionStatus(s.expiryDate)))
    .sort((a,b) => {
@@ -526,26 +794,78 @@ export default function WhatsAppView() {
      return (o[getSubscriptionStatus(a.expiryDate)]??9) - (o[getSubscriptionStatus(b.expiryDate)]??9)
    })
 
+  // ── Separar combos de individuales ───────────────────────────────────
+  // Agrupar por (teléfono_normalizado + fecha) para detectar combos
+  const comboMap = new Map()
+  allPending.forEach(s => {
+    if (s.isReseller) return // revendedores nunca son combo
+    const norm = (s.phone || '').replace(/\D/g,'')
+    if (!norm || !s.expiryDate) return
+    const key = norm + '_' + s.expiryDate
+    if (!comboMap.has(key)) comboMap.set(key, [])
+    comboMap.get(key).push(s)
+  })
+  // IDs que pertenecen a un combo (2+ plataformas distintas)
+  const comboProfileIds = new Set()
+  const comboItems = []
+  comboMap.forEach((group) => {
+    const plats = [...new Set(group.map(s => s.platform))]
+    if (plats.length < 2) return
+    group.forEach(s => comboProfileIds.add(s.id))
+    const status = group.reduce((w, s) => {
+      const o = { expired:0, today:1, soon:2 }
+      const ss = getSubscriptionStatus(s.expiryDate)
+      return (o[ss]??9) < (o[w]??9) ? ss : w
+    }, 'active')
+    const comboPrice = getComboPriceByPlatforms(plats)
+    const sumPrice   = plats.reduce((t, p) => t + getPlatformRenewalPrice(p), 0)
+    comboItems.push({
+      key:         group[0].phone.replace(/\D/g,'') + '_' + group[0].expiryDate,
+      clientName:  group[0].clientName,
+      phone:       group[0].phone,
+      expiryDate:  group[0].expiryDate,
+      platforms:   plats.sort(),
+      status,
+      comboPrice,
+      sumPrice,
+      noComboPrice: comboPrice === null,
+      profiles:    group.map(s => ({ accountId: s.accountId, profileId: s.id, isFullAccount: s.isFullAccount, fullClientData: s.isFullAccount ? { clientName: s.clientName, phone: s.phone } : null, platform: s.platform, email: s.email, password: s.password, pin: s.pin, number: s.number })),
+    })
+  })
+
   // Plataformas disponibles en los pendientes
   const availablePlats = ['all', ...new Set(allPending.map(s => s.platform))]
 
   const statusFiltered = statusFilter==='all' ? allPending : allPending.filter(s => getSubscriptionStatus(s.expiryDate)===statusFilter)
   const platFiltered   = platFilter==='all'   ? statusFiltered : statusFiltered.filter(s => s.platform===platFilter)
   const q = search.toLowerCase().trim()
-  const filteredClients = !q ? platFiltered : platFiltered.filter(s => {
+  // Individuales = los que NO están en un combo
+  const filteredClients = (!q ? platFiltered : platFiltered.filter(s => {
     const nameMatch  = (s.clientName || '').toLowerCase().includes(q)
     const qDigits    = q.replace(/\D/g,'')
     const phoneMatch = qDigits.length > 0 && (s.phone || '').replace(/\D/g,'').includes(qDigits)
     return nameMatch || phoneMatch
+  })).filter(s => !comboProfileIds.has(s.id))
+
+  const statusFilteredCombos = statusFilter === 'all' ? comboItems : comboItems.filter(c => c.status === statusFilter)
+  const platFilteredCombos   = platFilter === 'all'   ? statusFilteredCombos : statusFilteredCombos.filter(c => c.platforms.includes(platFilter))
+  const filteredCombos = !q ? platFilteredCombos : platFilteredCombos.filter(c => {
+    const nameMatch = c.clientName.toLowerCase().includes(q)
+    const qDigits = q.replace(/\D/g,'')
+    return nameMatch || (qDigits && c.phone.replace(/\D/g,'').includes(qDigits))
   })
 
+  // Conteos de tabs: individuales (sin combo) + combos
+  const individualCount = allPending.filter(s => !comboProfileIds.has(s.id))
   const statusCounts = {
-    all:     allPending.length,
-    expired: allPending.filter(s=>getSubscriptionStatus(s.expiryDate)==='expired').length,
-    today:   allPending.filter(s=>getSubscriptionStatus(s.expiryDate)==='today').length,
-    soon:    allPending.filter(s=>getSubscriptionStatus(s.expiryDate)==='soon').length,
+    all:     individualCount.length + comboItems.length,
+    expired: individualCount.filter(s=>getSubscriptionStatus(s.expiryDate)==='expired').length + comboItems.filter(c=>c.status==='expired').length,
+    today:   individualCount.filter(s=>getSubscriptionStatus(s.expiryDate)==='today').length   + comboItems.filter(c=>c.status==='today').length,
+    soon:    individualCount.filter(s=>getSubscriptionStatus(s.expiryDate)==='soon').length    + comboItems.filter(c=>c.status==='soon').length,
   }
-  const sendable = filteredClients.filter(s => s.phone?.replace(/\D/g,''))
+  const sendableIndividual = filteredClients.filter(s => s.phone?.replace(/\D/g,''))
+  const sendableCombos     = filteredCombos.filter(c => c.phone?.replace(/\D/g,''))
+  const sendable = [...sendableIndividual, ...sendableCombos]
 
   /* ── Cuentas por proveedor ── */
   const allExpAccounts = accounts
@@ -567,11 +887,20 @@ export default function WhatsAppView() {
 
   /* ── Bulk send ── */
   const handleBulkSend = async () => {
-    const messages = sendable.map(sub => {
-      const st  = getSubscriptionStatus(sub.expiryDate)
-      const tpl = templates[st] || templates.soon
-      return { phone: sub.phone, text: fillTemplate(tpl, sub) }
-    })
+    const messages = [
+      // Individuales (revendedores usan plantilla especial con correo)
+      ...sendableIndividual.map(sub => {
+        const st  = getSubscriptionStatus(sub.expiryDate)
+        const tpl = sub.isReseller ? (templates.reseller || DEFAULT_TEMPLATES.reseller) : (templates[st] || templates.soon)
+        return { phone: sub.phone, text: fillTemplate(tpl, sub) }
+      }),
+      // Combos — mensaje combinado de todas las plataformas
+      ...sendableCombos.map(combo => {
+        const tpl = templates[combo.status] || templates.soon
+        const fakeSub = { clientName: combo.clientName, platform: combo.platforms.join(' + '), expiryDate: combo.expiryDate, email: '' }
+        return { phone: combo.phone, text: fillTemplate(tpl, fakeSub) }
+      }),
+    ]
     await sendBulk(messages)
   }
 
@@ -643,11 +972,11 @@ export default function WhatsAppView() {
             </button>
             {showTemplates && (
               <div className="mt-4 space-y-3">
-                {[{key:'expired',label:'Vencido'},{key:'today',label:'Vence hoy'},{key:'soon',label:'Próximo'}].map(({key,label})=>(
+                {[{key:'expired',label:'Vencido'},{key:'today',label:'Vence hoy'},{key:'soon',label:'Próximo'},{key:'reseller',label:'Revendedor'}].map(({key,label})=>(
                   <div key={key}>
                     <div className="flex items-center justify-between mb-1">
                       <label className="form-label">{label}</label>
-                      <span className="text-[10px] text-slate-600 italic">{'{{nombre}} {{plataforma}} {{fecha}}'}</span>
+                      <span className="text-[10px] text-slate-600 italic">{'{{nombre}} {{plataforma}} {{fecha}} {{correo}}'}</span>
                     </div>
                     <textarea className="form-input text-xs leading-relaxed" rows={2}
                       style={{ resize:'vertical', fontFamily:'inherit' }}
@@ -724,26 +1053,45 @@ export default function WhatsAppView() {
             </div>
           )}
 
-          {filteredClients.length===0 ? (
+          {filteredClients.length===0 && filteredCombos.length===0 ? (
             <div className="glass-card flex flex-col items-center justify-center py-16 gap-3">
               <CheckCircle size={44} className="text-emerald-500 opacity-20"/>
               <p className="text-slate-600 text-sm">No hay clientes pendientes.</p>
             </div>
           ) : (
             <div className="space-y-2">
+              {/* Combos primero */}
+              {filteredCombos.map((combo, idx) => (
+                <motion.div key={combo.key}
+                  initial={{opacity:0,y:8}} animate={{opacity:1,y:0}}
+                  transition={{delay:Math.min(idx*0.03,0.35)}}>
+                  <ComboClientItem combo={combo}
+                    onCopyMsg={msg => copyToClipboard(msg, 'Mensaje')}
+                    onRelease={releaseProfileWithPIN}
+                    onReleaseFull={releaseFullClient}
+                    onRenewCombo={(c, newDateStr, label, amount) =>
+                      renewCombo(
+                        c.profiles, newDateStr, label, amount,
+                        c.clientName, c.phone,
+                        c.platforms.join(' + ')
+                      )
+                    }/>
+                </motion.div>
+              ))}
+              {/* Individuales */}
               {filteredClients.map((sub,idx)=>{
                 const st=getSubscriptionStatus(sub.expiryDate)
                 return (
                   <motion.div key={sub.id}
                     initial={{opacity:0,y:8}} animate={{opacity:1,y:0}}
-                    transition={{delay:Math.min(idx*0.03,0.35)}}>
+                    transition={{delay:Math.min((filteredCombos.length+idx)*0.03,0.35)}}>
                     <ClientItem sub={sub} status={st}
-                      template={templates[st]||templates.soon}
+                      template={sub.isReseller ? (templates.reseller||DEFAULT_TEMPLATES.reseller) : (templates[st]||templates.soon)}
                       onCopyMsg={msg=>copyToClipboard(msg,'Mensaje')}
                       onRenew={(accountId, profileId, newDateStr, label) =>
                         sub.isFullAccount
-                          ? extendFullAccountClient(accountId, newDateStr, label)
-                          : extendProfile(accountId, profileId, newDateStr, label)
+                          ? extendFullAccountClient(accountId, newDateStr, label, sub.isReseller ? getPlatformResellerPrice(sub.platform) : getPlatformRenewalPrice(sub.platform))
+                          : extendProfile(accountId, profileId, newDateStr, label, sub.isReseller ? getPlatformResellerPrice(sub.platform) : getPlatformRenewalPrice(sub.platform))
                       }
                       onRelease={releaseProfileWithPIN}
                       onReleaseFull={releaseFullClient}/>

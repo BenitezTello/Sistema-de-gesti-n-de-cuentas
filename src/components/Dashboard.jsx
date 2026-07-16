@@ -82,7 +82,12 @@ async function fetchJson(path) {
 }
 
 export default function Dashboard({ onNavigate }) {
-  const { accounts, getSubscriptionStatus, copyToClipboard, exportToXLSX, showToast, loadFinancialSummary, currentUser, platformPrices, getPlatformPrice } = useApp()
+  const { accounts, savedClients, getSubscriptionStatus, copyToClipboard, exportToXLSX, showToast, loadFinancialSummary, currentUser, platformPrices, getPlatformPrice, getPlatformRenewalPrice, getPlatformResellerPrice, getComboPriceByPlatforms } = useApp()
+
+  const isClientReseller = (phone) => {
+    const norm = (phone || '').replace(/\D/g,'')
+    return norm ? (savedClients || []).some(c => c.id === norm && c.is_reseller === 1) : false
+  }
   const isAdmin = currentUser?.role === 'admin'
   const [filter,        setFilter]        = useState('all')
   const [page,          setPage]          = useState(1)
@@ -101,18 +106,22 @@ export default function Dashboard({ onNavigate }) {
   }, [loadFinancialSummary, isAdmin])
 
   // ── Métricas de suscripciones ────────────────────────────────────────
-  const allSubs = accounts.flatMap(acc =>
-    acc.profiles
-      .filter(p => p.clientName)
-      .map(p => ({
-        ...p,
-        platform: acc.platform,
-        email:    acc.email,
-        password: acc.password,
-        accountId: acc.id,
-        status:   getSubscriptionStatus(p.expiryDate),
+  const allSubs = [
+    ...accounts.flatMap(acc =>
+      acc.profiles.filter(p => p.clientName).map(p => ({
+        ...p, platform: acc.platform, email: acc.email, password: acc.password,
+        accountId: acc.id, status: getSubscriptionStatus(p.expiryDate),
       }))
-  ).sort((a, b) => {
+    ),
+    ...accounts
+      .filter(acc => acc.isFullAccount && acc.fullClient?.clientName)
+      .map(acc => ({
+        id: `full-${acc.id}`, clientName: acc.fullClient.clientName,
+        phone: acc.fullClient.phone || '', expiryDate: acc.fullClient.expiryDate || '',
+        platform: acc.platform, email: acc.email, password: acc.password, accountId: acc.id,
+        status: getSubscriptionStatus(acc.fullClient.expiryDate),
+      })),
+  ].sort((a, b) => {
     const order = { expired: 0, today: 1, soon: 2, active: 3 }
     return (order[a.status] ?? 4) - (order[b.status] ?? 4)
   })
@@ -184,7 +193,7 @@ export default function Dashboard({ onNavigate }) {
     {
       id: 'clients', icon: Users, label: 'Clientes',
       color: '#a78bfa', bg: 'rgba(167,139,250,0.12)',
-      stat: `${allSubs.length} activos`,
+      stat: `${allSubs.length} perfiles asignados`,
     },
     {
       id: 'whatsapp', icon: MessageSquare, label: 'Cobros WA',
@@ -213,7 +222,7 @@ export default function Dashboard({ onNavigate }) {
           { type:'expired', icon: AlertTriangle, label:'Vencidos',      count: counts.expired, nav:'whatsapp', color:'#ef4444' },
           { type:'today',   icon: Bell,          label:'Vencen hoy',    count: counts.today,   nav:'whatsapp', color:'#f59e0b' },
           { type:'soon',    icon: Clock,         label:'Próximos (2d)', count: counts.soon,    nav:'whatsapp', color:'#eab308' },
-          { type:'active',  icon: CheckCircle,   label:'Activos',       count: counts.active,  nav:'accounts', color:'#10b981' },
+          { type:'active',  icon: CheckCircle,   label:'Al día',           count: counts.active,  nav:'accounts', color:'#10b981' },
         ].map(({ type, icon: Icon, label, count, nav, color }, i) => (
           <motion.button key={type}
             initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
@@ -361,7 +370,7 @@ export default function Dashboard({ onNavigate }) {
           </div>
           <div>
             <p className="font-bold text-slate-200">Exportar Excel</p>
-            <p className="text-sm text-slate-500 mt-0.5">{allSubs.length} suscripciones activas</p>
+            <p className="text-sm text-slate-500 mt-0.5">{allSubs.length} perfiles asignados</p>
           </div>
         </motion.button>
       </div>
@@ -561,23 +570,62 @@ export default function Dashboard({ onNavigate }) {
         const endMonth = endOfMonth(now)
 
         // ── Ingresos: perfiles con cliente que vencen este mes ────────
-        const incomeItems = []
+        // Paso 1: recolectar todos los perfiles pendientes con su metadata
+        const rawItems = []
         accounts.forEach(acc => {
           if (acc.isDown) return
           if (acc.isFullAccount) {
             const fc = acc.fullClient
             if (!fc?.clientName || !fc?.expiryDate) return
             const exp = new Date(fc.expiryDate + 'T00:00:00')
-            if (exp <= endMonth)
-              incomeItems.push({ platform: acc.platform, price: getPlatformPrice(acc.platform), expired: exp < now })
+            if (exp <= endMonth) rawItems.push({ platform: acc.platform, phone: fc.phone || '', expiryDate: fc.expiryDate, expired: exp < now })
           } else {
             acc.profiles.forEach(p => {
               if (!p.clientName || !p.expiryDate) return
               const exp = new Date(p.expiryDate + 'T00:00:00')
-              if (exp <= endMonth)
-                incomeItems.push({ platform: acc.platform, price: getPlatformPrice(acc.platform), expired: exp < now })
+              if (exp <= endMonth) rawItems.push({ platform: acc.platform, phone: p.phone || '', expiryDate: p.expiryDate, expired: exp < now })
             })
           }
+        })
+        // Paso 2: agrupar por (teléfono + fecha) para detectar combos
+        const clientGroups = new Map()
+        rawItems.forEach(item => {
+          const norm = item.phone.replace(/\D/g,'')
+          if (!norm) { /* sin teléfono: tratar como individual */ return }
+          const key = norm + '_' + item.expiryDate
+          if (!clientGroups.has(key)) clientGroups.set(key, [])
+          clientGroups.get(key).push(item)
+        })
+        // Paso 3: calcular precio por grupo
+        const incomeItems    = []
+        const resellerItems  = []
+        const processedPhoneDates = new Set()
+        rawItems.forEach(item => {
+          const norm = item.phone.replace(/\D/g,'')
+          const key  = norm + '_' + item.expiryDate
+          if (processedPhoneDates.has(key)) return
+          processedPhoneDates.add(key)
+          const reseller = norm ? isClientReseller(item.phone) : false
+          if (reseller) {
+            // Revendedor: siempre precio individual por plataforma
+            const group = clientGroups.get(key) || [item]
+            group.forEach(i => resellerItems.push({ platform: i.platform, price: getPlatformResellerPrice(i.platform), expired: i.expired }))
+            return
+          }
+          const group = clientGroups.get(key) || [item]
+          const plats = [...new Set(group.map(i => i.platform))]
+          if (plats.length >= 2) {
+            // Combo: buscar precio de combo configurado
+            const comboPrice = getComboPriceByPlatforms(plats)
+            const price = comboPrice !== null ? comboPrice : group.reduce((t, i) => t + getPlatformRenewalPrice(i.platform), 0)
+            incomeItems.push({ platform: plats.join('+'), price, expired: item.expired })
+          } else {
+            incomeItems.push({ platform: item.platform, price: getPlatformRenewalPrice(item.platform), expired: item.expired })
+          }
+        })
+        // Items sin teléfono: tratar como individuales
+        rawItems.filter(i => !i.phone.replace(/\D/g,'')).forEach(i => {
+          incomeItems.push({ platform: i.platform, price: getPlatformRenewalPrice(i.platform), expired: i.expired })
         })
 
         // ── Egresos: cuentas con expiryDate este mes y cost > 0 ───────
@@ -589,12 +637,24 @@ export default function Dashboard({ onNavigate }) {
             expenseItems.push({ platform: acc.platform, cost: acc.cost, expired: exp < now })
         })
 
-        if (!incomeItems.length && !expenseItems.length) return null
+        // ── Potencial: perfiles libres disponibles para vender ────────
+        const availableItems = []
+        accounts.forEach(acc => {
+          if (acc.isDown || acc.isFullAccount) return
+          acc.profiles.forEach(p => {
+            if (!p.clientName)
+              availableItems.push({ platform: acc.platform, price: getPlatformPrice(acc.platform) })
+          })
+        })
 
-        const totalIncome  = incomeItems.reduce((s, i) => s + i.price, 0)
-        const totalCost    = expenseItems.reduce((s, i) => s + i.cost,  0)
-        const netProjected = totalIncome - totalCost
-        const netColor     = netProjected >= 0 ? '#4ade80' : '#f87171'
+        if (!incomeItems.length && !resellerItems.length && !expenseItems.length && !availableItems.length) return null
+
+        const totalIncome    = incomeItems.reduce((s, i) => s + i.price, 0)
+        const totalReseller  = resellerItems.reduce((s, i) => s + i.price, 0)
+        const totalCost      = expenseItems.reduce((s, i) => s + i.cost,  0)
+        const totalAvailable = availableItems.reduce((s, i) => s + i.price, 0)
+        const netProjected   = totalIncome + totalReseller + totalAvailable - totalCost
+        const netColor       = netProjected >= 0 ? '#4ade80' : '#f87171'
 
         // Agrupar por plataforma
         const byIncome = {}
@@ -608,6 +668,18 @@ export default function Dashboard({ onNavigate }) {
           if (!byExpense[i.platform]) byExpense[i.platform] = { count: 0, total: 0 }
           byExpense[i.platform].count++
           byExpense[i.platform].total += i.cost
+        })
+        const byReseller = {}
+        resellerItems.forEach(i => {
+          if (!byReseller[i.platform]) byReseller[i.platform] = { count: 0, total: 0 }
+          byReseller[i.platform].count++
+          byReseller[i.platform].total += i.price
+        })
+        const byAvailable = {}
+        availableItems.forEach(i => {
+          if (!byAvailable[i.platform]) byAvailable[i.platform] = { count: 0, total: 0 }
+          byAvailable[i.platform].count++
+          byAvailable[i.platform].total += i.price
         })
 
         const PlatRow = ({ plat, count, total, sign, color, unit }) => (
@@ -649,6 +721,26 @@ export default function Dashboard({ onNavigate }) {
               </div>
             )}
 
+            {/* ── Revendedores ── */}
+            {resellerItems.length > 0 && (
+              <>
+                <div style={{ height:'1px', background:'rgba(255,255,255,0.05)', margin:'0.75rem 0' }}/>
+                <div className="mb-3">
+                  <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider px-3 mb-1.5">
+                    Renovaciones revendedores · {resellerItems.length} cliente{resellerItems.length !== 1 ? 's' : ''}
+                  </p>
+                  <div className="space-y-1">
+                    {Object.entries(byReseller).sort((a,b) => b[1].total - a[1].total).map(([plat, d]) => (
+                      <PlatRow key={plat} plat={plat} count={d.count} total={d.total} sign="+" color="#fb923c" unit="revendedor" />
+                    ))}
+                  </div>
+                  <div className="flex justify-end mt-1.5 pr-3">
+                    <span className="text-sm font-bold" style={{ color:'#fb923c' }}>Total: +S/. {totalReseller.toFixed(2)}</span>
+                  </div>
+                </div>
+              </>
+            )}
+
             {/* ── Egresos ── */}
             {expenseItems.length > 0 && (
               <>
@@ -669,8 +761,28 @@ export default function Dashboard({ onNavigate }) {
               </>
             )}
 
+            {/* ── Perfiles disponibles ── */}
+            {availableItems.length > 0 && (
+              <>
+                <div style={{ height:'1px', background:'rgba(255,255,255,0.05)', margin:'0.75rem 0' }}/>
+                <div className="mb-3">
+                  <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider px-3 mb-1.5">
+                    Ventas potenciales · {availableItems.length} perfil{availableItems.length !== 1 ? 'es' : ''} libre{availableItems.length !== 1 ? 's' : ''}
+                  </p>
+                  <div className="space-y-1">
+                    {Object.entries(byAvailable).sort((a,b) => b[1].total - a[1].total).map(([plat, d]) => (
+                      <PlatRow key={plat} plat={plat} count={d.count} total={d.total} sign="+" color="#60a5fa" unit="perfil" />
+                    ))}
+                  </div>
+                  <div className="flex justify-end mt-1.5 pr-3">
+                    <span className="text-sm font-bold text-blue-400">Potencial: +S/. {totalAvailable.toFixed(2)}</span>
+                  </div>
+                </div>
+              </>
+            )}
+
             {/* ── Comparativa final ── */}
-            {incomeItems.length > 0 && expenseItems.length > 0 && (
+            {(incomeItems.length > 0 || resellerItems.length > 0 || availableItems.length > 0) && expenseItems.length > 0 && (
               <>
                 <div style={{ height:'1px', background:'rgba(255,255,255,0.05)', margin:'0.75rem 0' }}/>
                 <div className="flex items-center justify-between px-3 py-2 rounded-xl"

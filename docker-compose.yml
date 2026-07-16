@@ -14,6 +14,7 @@ services:
       - WA_PORT=3001
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - BOT_API_KEY=${BOT_API_KEY}
     volumes:
       - db_data:/app/server/data
     depends_on:
@@ -27,10 +28,15 @@ services:
       context: .
       dockerfile: Dockerfile.wa
     container_name: streammanager-wa
-    expose:
-      - "3001"
+    ports:
+      - "127.0.0.1:3001:3001"
     environment:
       - PORT=3001
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - BOT_ADMIN_PHONE=${BOT_ADMIN_PHONE}
+      - BOT_API_KEY=${BOT_API_KEY}
+      - APP_HOST=app
+      - APP_PORT=3000
       # Sin PUPPETEER_EXECUTABLE_PATH → usa el Chrome bundled de puppeteer
     volumes:
       - wa_session:/app/server/.wwebjs_auth

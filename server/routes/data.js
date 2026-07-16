@@ -36,8 +36,9 @@ router.post('/accounts', (req, res) => {
   const maxP    = num(b.maxProfiles, 1, 10)
   const cost    = num(b.cost, 0, 99999)
   const accountId = id()
+  const DEFAULT_PINS = ['3522','3622','3722','3822','3922','4022','4122']
   const profiles  = Array.from({ length: maxP }, (_, i) => ({
-    id: id(), accountId, number: i + 1, pin: '0000',
+    id: id(), accountId, number: i + 1, pin: DEFAULT_PINS[i] || '0000',
   }))
   const acc = db.createAccount({
     id: accountId,
@@ -99,12 +100,36 @@ router.put('/accounts/:id', (req, res) => {
         })
       }
     }
+    // Registrar ingreso si se renueva el cliente de cuenta completa
+    const fcRenewAmount = Number(b.renewAmount) || 0
+    if (b.saleType === 'renewal' && fcRenewAmount > 0 && clean.fullClient?.expiryDate) {
+      const prevFC = prevAcc?.fullClient || {}
+      if (clean.fullClient.expiryDate !== prevFC.expiryDate) {
+        db.createTransaction({
+          type: 'income', category: 'renewal',
+          platform: acc.platform, amount: fcRenewAmount,
+          clientName: clean.fullClient.clientName || prevFC.clientName || '',
+          clientPhone: clean.fullClient.phone || prevFC.phone || '',
+          accountId: req.params.id,
+          userId: req.user?.id || '', username: req.user?.username || 'sistema',
+        })
+      }
+    }
   }
   res.json(acc || { error: 'not found' })
 })
 
 router.delete('/accounts/:id', (req, res) => {
   const acc = db.getAccountById(req.params.id)
+  // Preservar clientes en saved_clients antes de que el CASCADE los borre
+  if (acc) {
+    acc.profiles.forEach(p => {
+      if (p.clientName) db.saveClient(p.clientName, p.phone)
+    })
+    if (acc.isFullAccount && acc.fullClient?.clientName) {
+      db.saveClient(acc.fullClient.clientName, acc.fullClient.phone)
+    }
+  }
   db.deleteAccount(req.params.id)
   audit(req, 'DELETE', 'account', req.params.id,
     acc ? `Eliminó cuenta ${acc.platform} (${acc.email})` : `Eliminó cuenta ${req.params.id}`)
@@ -138,6 +163,7 @@ router.put('/profiles/:id', (req, res) => {
   if (b.pin        !== undefined) clean.pin        = str(b.pin, 10)
   if (b.status        !== undefined) clean.status        = ['available','active'].includes(b.status) ? b.status : 'available'
   if (b.needsPinChange !== undefined) clean.needsPinChange = b.needsPinChange ? 1 : 0
+  if (b.isReseller     !== undefined) clean.isReseller     = b.isReseller ? 1 : 0
   if (b.expiryDate !== undefined) clean.expiryDate = date(b.expiryDate)
 
   const pwa = db.getProfileWithAccount(req.params.id)
@@ -201,6 +227,14 @@ router.post('/clients/extend', (req, res) => {
   db.extendClientAllProfiles(matchPhone, matchName, newDateStr)
   audit(req, 'UPDATE', 'client', matchPhone || matchName,
     `Renovó todos los perfiles de ${matchName || matchPhone} hasta ${newDateStr}`)
+  res.json({ ok: true })
+})
+
+router.post('/clients/reseller', (req, res) => {
+  const { phone, name, isReseller } = req.body
+  db.setClientResellerStatus(phone, name, !!isReseller)
+  audit(req, 'UPDATE', 'client', phone || name,
+    `${isReseller ? 'Marcó' : 'Desmarcó'} como revendedor a ${name || phone}`)
   res.json({ ok: true })
 })
 
@@ -326,7 +360,64 @@ router.put('/platform-prices/:platform', adminMiddleware, (req, res) => {
   if (isNaN(price) || price < 0) return res.status(400).json({ error: 'Precio inválido' })
   db.updatePlatformPrice(req.params.platform, price)
   audit(req, 'UPDATE', 'payment', req.params.platform,
-    `Actualizó precio de ${req.params.platform} a S/ ${price}`)
+    `Actualizó precio de venta de ${req.params.platform} a S/ ${price}`)
+  res.json({ ok: true })
+})
+
+router.put('/platform-prices/:platform/renewal', adminMiddleware, (req, res) => {
+  const price = Number(req.body?.price)
+  if (isNaN(price) || price < 0) return res.status(400).json({ error: 'Precio inválido' })
+  db.updatePlatformRenewalPrice(req.params.platform, price)
+  audit(req, 'UPDATE', 'payment', req.params.platform,
+    `Actualizó precio de renovación de ${req.params.platform} a S/ ${price}`)
+  res.json({ ok: true })
+})
+
+router.put('/platform-prices/:platform/reseller', adminMiddleware, (req, res) => {
+  const price = Number(req.body?.price)
+  if (isNaN(price) || price < 0) return res.status(400).json({ error: 'Precio inválido' })
+  db.updatePlatformResellerPrice(req.params.platform, price)
+  audit(req, 'UPDATE', 'payment', req.params.platform,
+    `Actualizó precio de revendedor de ${req.params.platform} a S/ ${price}`)
+  res.json({ ok: true })
+})
+
+// ── Combo Prices ──────────────────────────────────────────────────────
+router.get('/combo-prices', (req, res) => {
+  res.json(db.getComboPrices())
+})
+
+router.put('/combo-prices', adminMiddleware, (req, res) => {
+  const { platforms, price } = req.body || {}
+  if (!Array.isArray(platforms) || platforms.length < 2) return res.status(400).json({ error: 'Mínimo 2 plataformas' })
+  const p = Number(price)
+  if (isNaN(p) || p < 0) return res.status(400).json({ error: 'Precio inválido' })
+  const row = db.upsertComboPrice(platforms, p)
+  audit(req, 'UPDATE', 'payment', row.id, `Configuró precio de combo ${row.platforms} a S/ ${p}`)
+  res.json(row)
+})
+
+router.delete('/combo-prices/:id', adminMiddleware, (req, res) => {
+  db.deleteComboPrice(req.params.id)
+  audit(req, 'DELETE', 'payment', req.params.id, `Eliminó precio de combo ${req.params.id}`)
+  res.json({ ok: true })
+})
+
+// ── Manual transaction (para combos) ─────────────────────────────────
+router.post('/transactions/manual', (req, res) => {
+  const b = req.body || {}
+  if (!b.type || !b.amount) return res.status(400).json({ error: 'Faltan campos' })
+  db.createTransaction({
+    type:        String(b.type),
+    category:    String(b.category || 'renewal'),
+    platform:    String(b.platform || ''),
+    amount:      Number(b.amount) || 0,
+    clientName:  String(b.clientName || ''),
+    clientPhone: String(b.clientPhone || ''),
+    notes:       String(b.notes || ''),
+    userId:      req.user?.id || '',
+    username:    req.user?.username || 'sistema',
+  })
   res.json({ ok: true })
 })
 

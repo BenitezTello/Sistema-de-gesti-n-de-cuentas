@@ -208,9 +208,9 @@ export function AccountForm({ onSave, onClose, initialData = {}, suppliers = [],
           </div>
         </div>
 
-        {form.platform === 'Disney+' && (
+        {['Disney+', 'HBO Max'].includes(form.platform) && (
           <div className="col-span-2">
-            <label className="form-label">Acceso Disney+</label>
+            <label className="form-label">Acceso {form.platform}</label>
             <input type="text" className="form-input" placeholder="Código de acceso"
               value={form.access} onChange={e => set('access', e.target.value)} />
             <p className="text-[11px] text-slate-600 mt-1">Se enviará al cliente junto con sus credenciales.</p>
@@ -260,7 +260,7 @@ export function AccountForm({ onSave, onClose, initialData = {}, suppliers = [],
 }
 
 /* ── Assign / Edit client Form ─────────────────────────────────────── */
-export function AssignClientForm({ onSave, onClose, initialData = {}, platformName = '', platformPrice = 0 }) {
+export function AssignClientForm({ onSave, onClose, initialData = {}, platformName = '', platformPrice = 0, platformResellerPrice = 0 }) {
   const { accounts, savedClients } = useApp()
   const isNewAssignment = !initialData.clientName
 
@@ -271,8 +271,8 @@ export function AssignClientForm({ onSave, onClose, initialData = {}, platformNa
     expiryDate: initialData.expiryDate || '',
   })
   const [search,      setSearch]      = useState('')
-  const [saleType,    setSaleType]    = useState('sale')     // 'sale'|'replacement'|'gift'  (nueva asignación)
-  const [isRenewal,   setIsRenewal]   = useState(false)      // renovación en modo edición
+  const [saleType,    setSaleType]    = useState('sale')
+  const [isRenewal,   setIsRenewal]   = useState(false)
   const [saleAmount,  setSaleAmount]  = useState(platformPrice || 0)
 
   // Sincronizar monto si cambia el precio de plataforma desde fuera

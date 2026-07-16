@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import {
   TrendingUp, TrendingDown, DollarSign, RefreshCw,
-  Filter, ChevronLeft, ChevronRight, Edit2, Save, X,
+  Filter, ChevronLeft, ChevronRight, ChevronDown, Edit2, Save, X,
 } from 'lucide-react'
 import { format, parseISO, startOfMonth, endOfMonth } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -57,9 +57,9 @@ async function apiFetch(path) {
 }
 
 // ── Price editor (admin only) ─────────────────────────────────────────
-function PriceRow({ pp, onSave }) {
+function PriceRow({ pp, field = 'price', onSave }) {
   const [editing, setEditing] = useState(false)
-  const [val, setVal] = useState(String(pp.price))
+  const [val, setVal] = useState(String(pp[field] ?? 0))
 
   const commit = () => {
     const n = parseFloat(val)
@@ -92,8 +92,8 @@ function PriceRow({ pp, onSave }) {
         </div>
       ) : (
         <div className="flex items-center gap-2">
-          <span className="text-sm font-bold text-slate-200">S/. {pp.price.toFixed(2)}</span>
-          <button className="btn-icon btn-icon-indigo" style={{ width:'1.6rem',height:'1.6rem' }} onClick={() => { setVal(String(pp.price)); setEditing(true) }}>
+          <span className="text-sm font-bold text-slate-200">S/. {(pp[field] ?? 0).toFixed(2)}</span>
+          <button className="btn-icon btn-icon-indigo" style={{ width:'1.6rem',height:'1.6rem' }} onClick={() => { setVal(String(pp[field] ?? 0)); setEditing(true) }}>
             <Edit2 size={11}/>
           </button>
         </div>
@@ -102,14 +102,149 @@ function PriceRow({ pp, onSave }) {
   )
 }
 
+function AccordionSection({ title, badge, hint, open, onToggle, children }) {
+  return (
+    <div className="border-t border-white/[0.06] first:border-t-0">
+      <button
+        className="w-full flex items-center justify-between py-3 px-1 hover:bg-white/[0.02] transition-colors rounded-lg"
+        onClick={onToggle}>
+        <span className="flex items-center gap-2 text-sm font-semibold text-slate-300">
+          {title}
+          {badge}
+        </span>
+        <ChevronDown size={14} className="text-slate-500 transition-transform duration-200"
+          style={{ transform: open ? 'rotate(180deg)' : 'rotate(0deg)' }}/>
+      </button>
+      {open && (
+        <div className="pb-3 space-y-2">
+          {children}
+          {hint && <p className="text-[11px] text-slate-600 px-1">{hint}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PriceConfig({ platformPrices, comboPrices, newComboPlats, setNewComboPlats, newComboPrice, setNewComboPrice,
+  updatePlatformPrice, updatePlatformRenewalPrice, updatePlatformResellerPrice, upsertComboPrice, deleteComboPrice }) {
+  const [openSale,     setOpenSale]     = useState(false)
+  const [openRenewal,  setOpenRenewal]  = useState(false)
+  const [openReseller, setOpenReseller] = useState(false)
+  const [openCombo,    setOpenCombo]    = useState(false)
+
+  return (
+    <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.2 }}
+      className="glass-card !py-2 !px-4">
+      <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider py-2">Configuración de precios</p>
+
+      <AccordionSection title="Precios de venta" open={openSale} onToggle={() => setOpenSale(v=>!v)}
+        hint="Se usan al registrar nuevas ventas.">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+          {platformPrices.map(pp => <PriceRow key={pp.platform} pp={pp} field="price" onSave={updatePlatformPrice}/>)}
+        </div>
+      </AccordionSection>
+
+      <AccordionSection title="Precios de renovación" open={openRenewal} onToggle={() => setOpenRenewal(v=>!v)}
+        hint="Se usan al renovar desde Cobros WA.">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+          {platformPrices.map(pp => <PriceRow key={pp.platform} pp={pp} field="renewal_price" onSave={updatePlatformRenewalPrice}/>)}
+        </div>
+      </AccordionSection>
+
+      <AccordionSection title="Precios de revendedor" open={openReseller} onToggle={() => setOpenReseller(v=>!v)}
+        hint="Se usan al renovar clientes marcados como revendedores."
+        badge={<span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background:'rgba(251,146,60,0.15)', color:'#fb923c', border:'1px solid rgba(251,146,60,0.3)' }}>REVENDEDOR</span>}>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+          {platformPrices.map(pp => <PriceRow key={pp.platform} pp={pp} field="reseller_price" onSave={updatePlatformResellerPrice}/>)}
+        </div>
+      </AccordionSection>
+
+      <AccordionSection title="Precios de combo" open={openCombo} onToggle={() => setOpenCombo(v=>!v)}
+        badge={<span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background:'rgba(139,92,246,0.15)', color:'#c084fc', border:'1px solid rgba(139,92,246,0.3)' }}>COMBO</span>}>
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <p className="text-[11px] text-slate-500">Selecciona las plataformas:</p>
+            <div className="flex flex-wrap gap-2">
+              {PLATFORMS.map(p => {
+                const selected = newComboPlats.includes(p)
+                return (
+                  <button key={p} type="button"
+                    onClick={() => setNewComboPlats(prev => selected ? prev.filter(x => x !== p) : [...prev, p])}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${PLATFORM_CLASS[p] || ''}`}
+                    style={{ opacity: selected ? 1 : 0.35, outline: selected ? '2px solid currentColor' : 'none', outlineOffset:'2px' }}>
+                    {p}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-slate-500">S/.</span>
+              <input type="number" min="0" step="0.5" placeholder="Precio"
+                className="form-input !py-1 !text-xs w-28"
+                value={newComboPrice} onChange={e => setNewComboPrice(e.target.value)}/>
+              <button className="btn-primary !py-1 !text-xs"
+                disabled={newComboPlats.length < 2 || !newComboPrice}
+                onClick={() => { upsertComboPrice(newComboPlats, Number(newComboPrice)); setNewComboPlats([]); setNewComboPrice('') }}>
+                Agregar
+              </button>
+            </div>
+          </div>
+          {comboPrices.length > 0 && (
+            <div className="space-y-0.5 border-t border-white/[0.06] pt-2">
+              {comboPrices.map(c => {
+                const plats = c.platforms.split('|')
+                return <ComboRow key={c.id} combo={c} plats={plats} onSave={p => upsertComboPrice(plats, p)} onDelete={() => deleteComboPrice(c.id)}/>
+              })}
+            </div>
+          )}
+          {comboPrices.length === 0 && <p className="text-[11px] text-slate-600">Aún no hay combos configurados.</p>}
+        </div>
+      </AccordionSection>
+    </motion.div>
+  )
+}
+
+function ComboRow({ combo, plats, onSave, onDelete }) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState(String(combo.price))
+  const commit = () => { const n = parseFloat(val); if (!isNaN(n) && n >= 0) onSave(n); setEditing(false) }
+  return (
+    <div className="flex items-center justify-between py-1.5 px-3 rounded-lg hover:bg-white/[0.03] transition-colors gap-2">
+      <div className="flex items-center gap-1 flex-wrap flex-1">
+        {plats.map((p, i) => (
+          <span key={p} className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold ${PLATFORM_CLASS[p] || ''}`}>{p}</span>
+        ))}
+      </div>
+      {editing ? (
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-slate-500">S/.</span>
+          <input type="number" min="0" step="0.5" className="form-input !py-0.5 !px-2 text-xs w-20"
+            value={val} onChange={e => setVal(e.target.value)} autoFocus
+            onKeyDown={e => { if (e.key==='Enter') commit(); if (e.key==='Escape') setEditing(false) }}/>
+          <button className="btn-icon" style={{width:'1.6rem',height:'1.6rem'}} onClick={commit}><Save size={11}/></button>
+          <button className="btn-icon btn-icon-danger" style={{width:'1.6rem',height:'1.6rem'}} onClick={()=>setEditing(false)}><X size={11}/></button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-bold text-slate-200">S/. {combo.price.toFixed(2)}</span>
+          <button className="btn-icon btn-icon-indigo" style={{width:'1.6rem',height:'1.6rem'}} onClick={()=>{setVal(String(combo.price));setEditing(true)}}><Edit2 size={11}/></button>
+          <button className="btn-icon btn-icon-danger" style={{width:'1.6rem',height:'1.6rem'}} onClick={onDelete}><X size={11}/></button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function PaymentsView() {
-  const { platformPrices, updatePlatformPrice, currentUser } = useApp()
+  const { platformPrices, updatePlatformPrice, updatePlatformRenewalPrice, updatePlatformResellerPrice, comboPrices, upsertComboPrice, deleteComboPrice, currentUser } = useApp()
   const isAdmin = currentUser?.role === 'admin'
 
   const [summary, setSummary]   = useState(null)
   const [txData,  setTxData]    = useState({ rows: [], total: 0, pages: 1, page: 1 })
   const [loading, setLoading]   = useState(true)
   const [error,   setError]     = useState('')
+  const [newComboPlats, setNewComboPlats] = useState([])
+  const [newComboPrice, setNewComboPrice] = useState('')
   const [page,    setPage]      = useState(1)
 
   const [filters, setFilters] = useState(() => {
@@ -219,20 +354,19 @@ export default function PaymentsView() {
         </motion.div>
       )}
 
-      {/* ── Precios por plataforma (solo admin) ── */}
-      {isAdmin && platformPrices.length > 0 && (
-        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay:0.2 }}
-          className="glass-card">
-          <h3 className="font-bold text-slate-200 mb-3 text-sm">Precios de venta por defecto</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
-            {platformPrices.map(pp => (
-              <PriceRow key={pp.platform} pp={pp} onSave={updatePlatformPrice}/>
-            ))}
-          </div>
-          <p className="text-[11px] text-slate-600 mt-2 px-3">
-            Se usan como valor por defecto al registrar nuevas ventas.
-          </p>
-        </motion.div>
+      {/* ── Configuración de precios (solo admin) ── */}
+      {isAdmin && (
+        <PriceConfig
+          platformPrices={platformPrices}
+          comboPrices={comboPrices}
+          newComboPlats={newComboPlats} setNewComboPlats={setNewComboPlats}
+          newComboPrice={newComboPrice} setNewComboPrice={setNewComboPrice}
+          updatePlatformPrice={updatePlatformPrice}
+          updatePlatformRenewalPrice={updatePlatformRenewalPrice}
+          updatePlatformResellerPrice={updatePlatformResellerPrice}
+          upsertComboPrice={upsertComboPrice}
+          deleteComboPrice={deleteComboPrice}
+        />
       )}
 
       {/* ── Filtros ── */}
