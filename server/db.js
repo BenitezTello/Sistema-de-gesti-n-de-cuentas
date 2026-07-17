@@ -162,6 +162,26 @@ try {
   )`)
 } catch (_) {}
 
+// ── Integración Portal Cliente (TPS-2), Día 4: tickets ─────────────────
+// Los reportes/tickets viven acá (no en el portal) porque el admin que los
+// resuelve ya trabaja en TPS-1 (PLAN.md sección 3 de ABT-Portal-Cliente).
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS tickets (
+    id             TEXT PRIMARY KEY,
+    order_code     TEXT NOT NULL,
+    profile_id     TEXT DEFAULT '',
+    account_id     TEXT DEFAULT '',
+    client_name    TEXT DEFAULT '',
+    client_phone   TEXT DEFAULT '',
+    subject        TEXT NOT NULL,
+    description    TEXT DEFAULT '',
+    status         TEXT DEFAULT 'abierto',
+    admin_response TEXT DEFAULT '',
+    created_at     TEXT DEFAULT (datetime('now')),
+    resolved_at    TEXT DEFAULT ''
+  )`)
+} catch (_) {}
+
 // ── Helpers de mapeo (DB → JS) ──────────────────────────────────────
 function mapProfile(p) {
   return {
@@ -785,6 +805,230 @@ function deleteComboPrice(id) {
   db.prepare('DELETE FROM combo_prices WHERE id = ?').run(id)
 }
 
+// ── Integración Portal Cliente (TPS-2), Día 4 ──────────────────────────
+// GET /api/integration/stock — cuenta perfiles disponibles de una plataforma
+// (misma noción de "disponible" que usa el admin: status='available' y la
+// cuenta dueña no está caída).
+const _integrationFindAvailableProfile = db.prepare(`
+  SELECT p.id as profile_id, p.number, a.id as account_id, a.email, a.password
+  FROM profiles p
+  JOIN accounts a ON p.account_id = a.id
+  WHERE a.platform = ? AND (a.is_down IS NULL OR a.is_down = 0) AND p.status = 'available'
+  ORDER BY p.number ASC
+  LIMIT 1
+`)
+
+function countAvailableProfiles(platform) {
+  return db.prepare(`
+    SELECT COUNT(*) as c
+    FROM profiles p
+    JOIN accounts a ON p.account_id = a.id
+    WHERE a.platform = ? AND (a.is_down IS NULL OR a.is_down = 0) AND p.status = 'available'
+  `).get(platform).c
+}
+
+const _integrationAssignProfile = db.prepare(`
+  UPDATE profiles SET status = 'active', client_name = @clientName, phone = @clientPhone, expiry_date = @expiryDate
+  WHERE id = @profileId
+`)
+
+// POST /api/integration/assign-profile — todo en una única transacción síncrona:
+// better-sqlite3 es síncrono y Node single-thread, así que no hay forma de que dos
+// compras concurrentes intercalen el SELECT del perfil disponible y el UPDATE que lo
+// marca 'active' (PLAN.md sección 3 de ABT-Portal-Cliente). Devuelve null si no hay stock.
+function assignProfileForPortal({ platform, orderCode, clientName, clientPhone }) {
+  return db.transaction(() => {
+    const found = _integrationFindAvailableProfile.get(platform)
+    if (!found) return null
+
+    const expiry = new Date()
+    expiry.setDate(expiry.getDate() + 30)
+    const expiryDate = expiry.toISOString().slice(0, 10)
+
+    _integrationAssignProfile.run({
+      profileId: found.profile_id,
+      clientName: clientName || '',
+      clientPhone: clientPhone || '',
+      expiryDate,
+    })
+
+    const price = getPlatformPrice(platform)
+    createTransaction({
+      type: 'income', category: 'venta-portal',
+      platform, amount: price,
+      clientName: clientName || '', clientPhone: clientPhone || '',
+      profileId: found.profile_id, accountId: found.account_id,
+      notes: orderCode, // orders/order_code viven en el portal, no acá — se cruzan por este campo
+      userId: 'portal-system', username: 'Portal Cliente',
+    })
+
+    logAction('portal-system', 'Portal Cliente', 'assign_profile', 'profile', found.profile_id,
+      `Asignó perfil #${found.number} de ${platform} a ${clientName || '—'} vía Portal Cliente (pedido ${orderCode})`)
+
+    return {
+      profileId: found.profile_id,
+      accountEmail: found.email,
+      accountPassword: decrypt(found.password),
+      expiryDate,
+    }
+  })()
+}
+
+// ── Tickets (Portal Cliente, vía gateway) ──────────────────────────────
+const _insertIntegrationTicket = db.prepare(`
+  INSERT INTO tickets (id, order_code, profile_id, account_id, client_name, client_phone, subject, description)
+  VALUES (@id, @orderCode, @profileId, @accountId, @clientName, @clientPhone, @subject, @description)
+`)
+
+function insertIntegrationTicket({ orderCode, subject, description, clientName, clientPhone }) {
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+  // orders/order_code viven en el portal, no acá — se resuelve profile_id/account_id
+  // cruzando el orderCode guardado en transactions.notes por assignProfileForPortal.
+  const tx = db.prepare(
+    "SELECT profile_id, account_id FROM transactions WHERE notes = ? AND category = 'venta-portal' LIMIT 1"
+  ).get(orderCode)
+  _insertIntegrationTicket.run({
+    id,
+    orderCode,
+    profileId: tx?.profile_id || '',
+    accountId: tx?.account_id || '',
+    clientName: clientName || '',
+    clientPhone: clientPhone || '',
+    subject,
+    description: description || '',
+  })
+  return db.prepare('SELECT * FROM tickets WHERE id = ?').get(id)
+}
+
+function getIntegrationTicketsByOrderCodes(orderCodes) {
+  if (!orderCodes.length) return []
+  const placeholders = orderCodes.map(() => '?').join(',')
+  return db.prepare(
+    `SELECT * FROM tickets WHERE order_code IN (${placeholders}) ORDER BY created_at DESC`
+  ).all(...orderCodes)
+}
+
+function getTicketsCountByStatus() {
+  const rows = db.prepare('SELECT status, COUNT(*) as c FROM tickets GROUP BY status').all()
+  const result = { abierto: 0, en_revision: 0, resuelto: 0 }
+  rows.forEach(r => { result[r.status] = r.c })
+  return result
+}
+
+// ── Tickets — panel admin (lectura/resolución, consumido por server/routes/data.js) ──
+function getTickets({ status = '' } = {}) {
+  const where = []
+  const params = {}
+  if (status) { where.push('t.status = @status'); params.status = status }
+  const wc = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  return db.prepare(`
+    SELECT t.*, a.platform as platform
+    FROM tickets t
+    LEFT JOIN accounts a ON t.account_id = a.id
+    ${wc}
+    ORDER BY t.created_at DESC
+  `).all(params)
+}
+
+// ── Estado en vivo de un pedido del Portal Cliente ──────────────────────
+// No hay ningún "puntero" que haya que mantener sincronizado a mano: se resuelve
+// mirando el ticket más reciente con perfil asignado para ese order_code (si hubo
+// una reasignación) o, si no hay ninguno, la venta original en 'transactions'.
+// Como consulta el estado ACTUAL de profiles/accounts (no una foto vieja), también
+// refleja solo cambiar el PIN o extender el vencimiento sin necesidad de reasignar.
+// No incluye la contraseña a propósito — ese dato solo se muestra una vez, igual que
+// en la compra original (mismo criterio de seguridad que ya usa el portal).
+function getOrderCurrentProfile(orderCode) {
+  const fromTicket = db.prepare(`
+    SELECT profile_id FROM tickets
+    WHERE order_code = @orderCode AND profile_id != ''
+    ORDER BY created_at DESC LIMIT 1
+  `).get({ orderCode })
+
+  let profileId = fromTicket?.profile_id
+  if (!profileId) {
+    const fromTx = db.prepare(`
+      SELECT profile_id FROM transactions
+      WHERE notes = @orderCode AND category = 'venta-portal' LIMIT 1
+    `).get({ orderCode })
+    profileId = fromTx?.profile_id
+  }
+  if (!profileId) return null
+
+  const row = db.prepare(`
+    SELECT p.id as profile_id, p.expiry_date, p.status, a.email
+    FROM profiles p JOIN accounts a ON p.account_id = a.id
+    WHERE p.id = ?
+  `).get(profileId)
+  if (!row) return null
+
+  return { profileId: row.profile_id, accountEmail: row.email, expiryDate: row.expiry_date, status: row.status }
+}
+
+// Reasigna un ticket a un perfil distinto de la MISMA plataforma — resuelve "la
+// cuenta se cayó, muevo al cliente a otra" sin dejarlo sin nada: busca el perfil
+// nuevo ANTES de tocar el viejo, todo en una única transacción atómica. No genera
+// ninguna transacción de ingreso nueva (no hubo cobro, es un reemplazo de servicio).
+function reassignProfileForTicket(ticketId) {
+  return db.transaction(() => {
+    const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId)
+    if (!ticket) return { error: 'TICKET_NO_ENCONTRADO' }
+
+    let platform = ''
+    if (ticket.account_id) {
+      platform = db.prepare('SELECT platform FROM accounts WHERE id = ?').get(ticket.account_id)?.platform || ''
+    }
+    if (!platform) return { error: 'SIN_PLATAFORMA' }
+
+    const found = _integrationFindAvailableProfile.get(platform)
+    if (!found) return { error: 'SIN_STOCK', platform }
+
+    if (ticket.profile_id) {
+      db.prepare("UPDATE profiles SET status='available', client_name='', phone='' WHERE id = ?").run(ticket.profile_id)
+    }
+
+    const expiry = new Date()
+    expiry.setDate(expiry.getDate() + 30)
+    const expiryDate = expiry.toISOString().slice(0, 10)
+
+    _integrationAssignProfile.run({
+      profileId: found.profile_id,
+      clientName: ticket.client_name || '',
+      clientPhone: ticket.client_phone || '',
+      expiryDate,
+    })
+
+    db.prepare('UPDATE tickets SET profile_id = ?, account_id = ? WHERE id = ?')
+      .run(found.profile_id, found.account_id, ticketId)
+
+    return {
+      ticket,
+      profileId: found.profile_id,
+      profileNumber: found.number,
+      accountEmail: found.email,
+      accountPassword: decrypt(found.password),
+      expiryDate,
+      platform,
+    }
+  })()
+}
+
+function updateTicket(id, data) {
+  const sets = []
+  const params = { id }
+  if (data.status !== undefined) {
+    sets.push('status = @status', 'resolved_at = @resolvedAt')
+    params.status = data.status
+    params.resolvedAt = data.status === 'resuelto' ? new Date().toISOString().replace('T', ' ').slice(0, 19) : ''
+  }
+  if (data.adminResponse !== undefined) {
+    sets.push('admin_response = @adminResponse')
+    params.adminResponse = data.adminResponse
+  }
+  if (sets.length) db.prepare(`UPDATE tickets SET ${sets.join(', ')} WHERE id = @id`).run(params)
+  return db.prepare('SELECT * FROM tickets WHERE id = ?').get(id)
+}
+
 module.exports = {
   getAllAccounts, getAccountById, createAccount, updateAccount, deleteAccount,
   addProfile, deleteProfile,
@@ -800,4 +1044,8 @@ module.exports = {
   getComboPrices, getComboPriceByPlatforms, upsertComboPrice, deleteComboPrice,
   getClientsAnalytics,
   seedIfEmpty,
+  countAvailableProfiles, assignProfileForPortal,
+  insertIntegrationTicket, getIntegrationTicketsByOrderCodes, getTicketsCountByStatus,
+  getTickets, updateTicket,
+  getOrderCurrentProfile, reassignProfileForTicket,
 }

@@ -9,6 +9,7 @@ const ENTITY_LABELS = {
   supplier: 'Proveedor',
   client:   'Cliente',
   user:     'Usuario',
+  ticket:   'Ticket',
 }
 
 const ACTION_STYLES = {
@@ -24,6 +25,7 @@ const ENTITY_OPTIONS = [
   { value: 'supplier', label: 'Proveedores' },
   { value: 'client',   label: 'Clientes' },
   { value: 'user',     label: 'Usuarios' },
+  { value: 'ticket',   label: 'Tickets' },
 ]
 
 async function fetchAudit(params) {

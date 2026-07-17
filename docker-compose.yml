@@ -15,6 +15,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - BOT_API_KEY=${BOT_API_KEY}
+      - PORTAL_SERVICE_KEY=${PORTAL_SERVICE_KEY}
     volumes:
       - db_data:/app/server/data
     depends_on:

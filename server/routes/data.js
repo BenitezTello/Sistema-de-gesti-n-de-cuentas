@@ -484,6 +484,49 @@ router.get('/clients/analytics', (req, res) => {
   res.json(db.getClientsAnalytics())
 })
 
+// ── Tickets (reportes de clientes del Portal Cliente, PLAN.md Día 4) ──
+const TICKET_STATUSES = ['abierto', 'en_revision', 'resuelto']
+
+router.get('/tickets', (req, res) => {
+  const status = String(req.query.status || '').trim()
+  res.json(db.getTickets({ status: TICKET_STATUSES.includes(status) ? status : '' }))
+})
+
+// Reasigna el ticket a otro perfil disponible de la MISMA plataforma (la cuenta vieja
+// se cayó/tiene problemas) — busca el nuevo antes de liberar el viejo, ver db.js.
+router.post('/tickets/:id/reassign', (req, res) => {
+  const result = db.reassignProfileForTicket(req.params.id)
+
+  if (result.error === 'TICKET_NO_ENCONTRADO') return res.status(404).json({ error: result.error })
+  if (result.error === 'SIN_PLATAFORMA') return res.status(400).json({ error: result.error })
+  if (result.error === 'SIN_STOCK') return res.status(409).json({ error: 'SIN_STOCK', platform: result.platform })
+
+  audit(req, 'UPDATE', 'ticket', req.params.id,
+    `Reasignó ticket "${result.ticket.subject}" (${result.ticket.order_code}) de ${result.ticket.client_name || '—'} al perfil #${result.profileNumber} de ${result.platform}`)
+
+  res.json({
+    profileId: result.profileId,
+    accountEmail: result.accountEmail,
+    accountPassword: result.accountPassword,
+    expiryDate: result.expiryDate,
+    platform: result.platform,
+  })
+})
+
+router.put('/tickets/:id', (req, res) => {
+  const b = req.body || {}
+  const clean = {}
+  if (b.status !== undefined) clean.status = TICKET_STATUSES.includes(b.status) ? b.status : 'abierto'
+  if (b.adminResponse !== undefined) clean.adminResponse = str(b.adminResponse, 1000)
+
+  const ticket = db.updateTicket(req.params.id, clean)
+  if (ticket) {
+    audit(req, 'UPDATE', 'ticket', req.params.id,
+      `Actualizó ticket "${ticket.subject}" de ${ticket.client_name || ticket.order_code} → ${ticket.status}`)
+  }
+  res.json({ ok: true })
+})
+
 // ── Audit Log (solo admin) ────────────────────────────────────────────
 router.get('/audit', adminMiddleware, (req, res) => {
   const { page = 1, limit = 50, user = '', entity = '', from = '', to = '' } = req.query

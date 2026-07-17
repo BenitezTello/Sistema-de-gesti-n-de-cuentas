@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import Login from './components/Login'
-import { LayoutDashboard, Tv, MonitorPlay, MessageSquare, Truck, Users, UserCog, Shield, Menu, X, LogOut, Bell, ClipboardList, Wallet, FileText } from 'lucide-react'
+import { LayoutDashboard, Tv, MonitorPlay, MessageSquare, Truck, Users, UserCog, Shield, Menu, X, LogOut, Bell, ClipboardList, Wallet, FileText, Ticket } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { AppProvider, useApp } from './context/AppContext'
@@ -14,6 +14,7 @@ import UsersView from './components/UsersView'
 import AuditView from './components/AuditView'
 import PaymentsView from './components/PaymentsView'
 import ReportsView from './components/ReportsView'
+import TicketsView from './components/TicketsView'
 import ToastContainer from './components/Toast'
 
 const BASE_NAV = [
@@ -24,6 +25,7 @@ const BASE_NAV = [
   { id: 'whatsapp',      icon: MessageSquare,    label: 'Cobros WA',  adminOnly: false },
   { id: 'payments',      icon: Wallet,           label: 'Pagos',      adminOnly: false },
   { id: 'reports',       icon: FileText,         label: 'Reportes',   adminOnly: false },
+  { id: 'tickets',       icon: Ticket,           label: 'Tickets',    adminOnly: false },
   { id: 'suppliers',     icon: Truck,            label: 'Proveedores',adminOnly: true  },
   { id: 'users',         icon: UserCog,          label: 'Usuarios',   adminOnly: true  },
   { id: 'audit',         icon: ClipboardList,    label: 'Auditoría',  adminOnly: true  },
@@ -37,6 +39,7 @@ const PAGE_TITLES = {
   whatsapp:        { title: 'Cobros WA' },
   payments:        { title: 'Pagos' },
   reports:         { title: 'Reportes' },
+  tickets:         { title: 'Tickets' },
   suppliers:       { title: 'Proveedores' },
   users:           { title: 'Usuarios' },
   audit:           { title: 'Auditoría' },
@@ -170,6 +173,7 @@ function AppShell({ user, onLogout }) {
             {activeTab === 'whatsapp'      && <WhatsAppView />}
             {activeTab === 'payments'      && <PaymentsView />}
             {activeTab === 'reports'       && <ReportsView />}
+            {activeTab === 'tickets'       && <TicketsView />}
             {activeTab === 'suppliers'     && isAdmin && <SuppliersView />}
             {activeTab === 'users'         && isAdmin && <UsersView />}
             {activeTab === 'audit'         && isAdmin && <AuditView />}

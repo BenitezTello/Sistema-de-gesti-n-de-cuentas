@@ -6,6 +6,7 @@ const http       = require('http')
 const db         = require('./db')
 const dataRoutes = require('./routes/data')
 const botRoutes  = require('./routes/bot')
+const integrationRoutes = require('./routes/integration')
 const { router: authRoutes, authMiddleware } = require('./auth')
 
 const app = express()
@@ -42,6 +43,18 @@ function botAuth(req, res, next) {
   next()
 }
 app.use('/api/bot', botAuth, botRoutes)
+
+// ── Rutas de integración con ABT Portal Cliente (TPS-2), autenticadas con
+// clave compartida (X-Service-Key), no JWT — el admin sigue usando su propio
+// login, este es un servicio a servicio (PLAN.md Día 4 de ABT-Portal-Cliente).
+function serviceAuthMiddleware(req, res, next) {
+  const key = req.headers['x-service-key']
+  if (!process.env.PORTAL_SERVICE_KEY || key !== process.env.PORTAL_SERVICE_KEY) {
+    return res.status(401).json({ error: 'No autorizado' })
+  }
+  next()
+}
+app.use('/api/integration', serviceAuthMiddleware, integrationRoutes)
 
 // ── Proxy a servidor WhatsApp (protegido) ─────────────────────────────
 const WA_HOST = process.env.WA_HOST || 'localhost'
