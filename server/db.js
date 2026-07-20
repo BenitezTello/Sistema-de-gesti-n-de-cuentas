@@ -182,6 +182,13 @@ try {
   )`)
 } catch (_) {}
 
+// Día 5 (ABT-Portal-Cliente): credenciales nuevas pendientes de entregar al cliente
+// cuando el admin reasigna la cuenta de un ticket. Vive acá como JSON transitorio —
+// el portal la consume una sola vez (job de polling) y la confirma con /ack-credentials,
+// que la borra. Mismo criterio de "se muestra una vez" que ya usa el resto del sistema,
+// solo que estirado a "una vez, en el próximo chequeo del portal" en vez de síncrono.
+try { db.exec("ALTER TABLE tickets ADD COLUMN pending_credentials TEXT DEFAULT ''") } catch (_) {}
+
 // ── Helpers de mapeo (DB → JS) ──────────────────────────────────────
 function mapProfile(p) {
   return {
@@ -810,10 +817,24 @@ function deleteComboPrice(id) {
 // (misma noción de "disponible" que usa el admin: status='available' y la
 // cuenta dueña no está caída).
 const _integrationFindAvailableProfile = db.prepare(`
-  SELECT p.id as profile_id, p.number, a.id as account_id, a.email, a.password
+  SELECT p.id as profile_id, p.number, p.pin, a.id as account_id, a.email, a.password
   FROM profiles p
   JOIN accounts a ON p.account_id = a.id
   WHERE a.platform = ? AND (a.is_down IS NULL OR a.is_down = 0) AND p.status = 'available'
+  ORDER BY p.number ASC
+  LIMIT 1
+`)
+
+// Variante para reassignProfileForTicket: el botón "Reasignar cuenta" existe porque
+// la cuenta ACTUAL tiene un problema — excluye esa cuenta explícitamente, no solo las
+// marcadas is_down. Sin esto, si la cuenta actual tenía otro perfil libre, se le podía
+// devolver al mismo cliente un perfil de la MISMA cuenta problemática (bug real
+// encontrado el 2026-07-19: no resolvía nada, solo cambiaba el número de perfil).
+const _integrationFindAvailableProfileExcludingAccount = db.prepare(`
+  SELECT p.id as profile_id, p.number, p.pin, a.id as account_id, a.email, a.password
+  FROM profiles p
+  JOIN accounts a ON p.account_id = a.id
+  WHERE a.platform = ? AND a.id != ? AND (a.is_down IS NULL OR a.is_down = 0) AND p.status = 'available'
   ORDER BY p.number ASC
   LIMIT 1
 `)
@@ -867,8 +888,10 @@ function assignProfileForPortal({ platform, orderCode, clientName, clientPhone }
 
     return {
       profileId: found.profile_id,
+      profileNumber: found.number,
       accountEmail: found.email,
       accountPassword: decrypt(found.password),
+      profilePin: found.pin,
       expiryDate,
     }
   })()
@@ -934,35 +957,95 @@ function getTickets({ status = '' } = {}) {
 // No hay ningún "puntero" que haya que mantener sincronizado a mano: se resuelve
 // mirando el ticket más reciente con perfil asignado para ese order_code (si hubo
 // una reasignación) o, si no hay ninguno, la venta original en 'transactions'.
-// Como consulta el estado ACTUAL de profiles/accounts (no una foto vieja), también
-// refleja solo cambiar el PIN o extender el vencimiento sin necesidad de reasignar.
-// No incluye la contraseña a propósito — ese dato solo se muestra una vez, igual que
-// en la compra original (mismo criterio de seguridad que ya usa el portal).
-function getOrderCurrentProfile(orderCode) {
+// Compartido por getOrderCurrentProfile y renewProfileForPortal (PLAN.md Día 5,
+// ABT-Portal-Cliente) para no duplicar esta resolución en dos sitios.
+function _resolveProfileIdForOrder(orderCode) {
   const fromTicket = db.prepare(`
     SELECT profile_id FROM tickets
     WHERE order_code = @orderCode AND profile_id != ''
     ORDER BY created_at DESC LIMIT 1
   `).get({ orderCode })
+  if (fromTicket?.profile_id) return fromTicket.profile_id
 
-  let profileId = fromTicket?.profile_id
-  if (!profileId) {
-    const fromTx = db.prepare(`
-      SELECT profile_id FROM transactions
-      WHERE notes = @orderCode AND category = 'venta-portal' LIMIT 1
-    `).get({ orderCode })
-    profileId = fromTx?.profile_id
-  }
+  const fromTx = db.prepare(`
+    SELECT profile_id FROM transactions
+    WHERE notes = @orderCode AND category = 'venta-portal' LIMIT 1
+  `).get({ orderCode })
+  return fromTx?.profile_id || null
+}
+
+// Como consulta el estado ACTUAL de profiles/accounts (no una foto vieja), también
+// refleja solo cambiar el PIN o extender el vencimiento sin necesidad de reasignar.
+// No incluye la contraseña a propósito — ese dato solo se muestra una vez, igual que
+// en la compra original (mismo criterio de seguridad que ya usa el portal). Incluye
+// platform/renewalPrice (Día 5) para que el portal pueda cotizar la renovación sin
+// necesitar un endpoint nuevo — este mismo ya viaja por el job diario y "Actualizar".
+function getOrderCurrentProfile(orderCode) {
+  const profileId = _resolveProfileIdForOrder(orderCode)
   if (!profileId) return null
 
   const row = db.prepare(`
-    SELECT p.id as profile_id, p.expiry_date, p.status, a.email
+    SELECT p.id as profile_id, p.number, p.pin, p.expiry_date, p.status, a.email, a.platform
     FROM profiles p JOIN accounts a ON p.account_id = a.id
     WHERE p.id = ?
   `).get(profileId)
   if (!row) return null
 
-  return { profileId: row.profile_id, accountEmail: row.email, expiryDate: row.expiry_date, status: row.status }
+  return {
+    profileId: row.profile_id,
+    profileNumber: row.number,
+    accountEmail: row.email,
+    profilePin: row.pin,
+    expiryDate: row.expiry_date,
+    status: row.status,
+    platform: row.platform,
+    renewalPrice: getPlatformRenewalPrice(row.platform),
+  }
+}
+
+// POST /api/integration/renew-profile — extiende el vencimiento del perfil VIGENTE
+// de un pedido (mismo profile_id, a diferencia de reassignProfileForTicket que asigna
+// uno nuevo). A diferencia de la reasignación de ticket, acá SÍ hay un cobro nuevo
+// (ya efectivizado en Culqi del lado del portal antes de llamar esto), así que sí se
+// registra una transacción de ingreso — con el precio de renovación que TPS-1 mismo
+// calcula (nunca confía en un monto que le mande el portal, mismo criterio que
+// assignProfileForPortal). Si el perfil aún no vencía, extiende desde su vencimiento
+// actual (no se pierden días ya pagados); si ya venció, extiende desde hoy.
+function renewProfileForPortal(orderCode) {
+  return db.transaction(() => {
+    const profileId = _resolveProfileIdForOrder(orderCode)
+    if (!profileId) return null
+
+    const row = db.prepare(`
+      SELECT p.id as profile_id, p.number, p.pin, p.expiry_date, p.client_name, p.phone, a.id as account_id, a.platform
+      FROM profiles p JOIN accounts a ON p.account_id = a.id
+      WHERE p.id = ?
+    `).get(profileId)
+    if (!row) return null
+
+    const today = new Date()
+    const currentExpiry = row.expiry_date ? new Date(row.expiry_date) : null
+    const base = currentExpiry && currentExpiry > today ? currentExpiry : today
+    base.setDate(base.getDate() + 30)
+    const expiryDate = base.toISOString().slice(0, 10)
+
+    db.prepare('UPDATE profiles SET expiry_date = ? WHERE id = ?').run(expiryDate, profileId)
+
+    const price = getPlatformRenewalPrice(row.platform)
+    createTransaction({
+      type: 'income', category: 'renovacion-portal',
+      platform: row.platform, amount: price,
+      clientName: row.client_name || '', clientPhone: row.phone || '',
+      profileId: row.profile_id, accountId: row.account_id,
+      notes: orderCode,
+      userId: 'portal-system', username: 'Portal Cliente',
+    })
+
+    logAction('portal-system', 'Portal Cliente', 'renew_profile', 'profile', profileId,
+      `Renovó perfil de ${row.platform} vía Portal Cliente (pedido ${orderCode}), nuevo vencimiento ${expiryDate}`)
+
+    return { profileId, profileNumber: row.number, profilePin: row.pin, expiryDate, amountCharged: price, platform: row.platform }
+  })()
 }
 
 // Reasigna un ticket a un perfil distinto de la MISMA plataforma — resuelve "la
@@ -980,7 +1063,7 @@ function reassignProfileForTicket(ticketId) {
     }
     if (!platform) return { error: 'SIN_PLATAFORMA' }
 
-    const found = _integrationFindAvailableProfile.get(platform)
+    const found = _integrationFindAvailableProfileExcludingAccount.get(platform, ticket.account_id)
     if (!found) return { error: 'SIN_STOCK', platform }
 
     if (ticket.profile_id) {
@@ -998,19 +1081,57 @@ function reassignProfileForTicket(ticketId) {
       expiryDate,
     })
 
-    db.prepare('UPDATE tickets SET profile_id = ?, account_id = ? WHERE id = ?')
-      .run(found.profile_id, found.account_id, ticketId)
+    const accountPassword = decrypt(found.password)
+
+    // Queda pendiente de entregar al cliente por correo — el portal la recoge en su
+    // próximo chequeo (job de polling, PLAN.md Día 5) y la confirma con /ack-credentials,
+    // que borra este campo. No se guarda en ningún otro lado más que acá, transitoriamente.
+    const pendingCredentials = JSON.stringify({
+      profileId: found.profile_id,
+      profileNumber: found.number,
+      accountEmail: found.email,
+      accountPassword,
+      profilePin: found.pin,
+      expiryDate,
+    })
+
+    db.prepare('UPDATE tickets SET profile_id = ?, account_id = ?, pending_credentials = ? WHERE id = ?')
+      .run(found.profile_id, found.account_id, pendingCredentials, ticketId)
 
     return {
       ticket,
       profileId: found.profile_id,
       profileNumber: found.number,
       accountEmail: found.email,
-      accountPassword: decrypt(found.password),
+      accountPassword,
+      profilePin: found.pin,
       expiryDate,
       platform,
     }
   })()
+}
+
+// GET /api/integration/tickets/notifications — consumido por el job de polling del
+// portal (PLAN.md Día 5): trae los tickets de esos order_codes con su estado actual
+// (status/admin_response) y, si hubo una reasignación pendiente de avisar, las
+// credenciales nuevas. El portal decide localmente si hay algo nuevo que notificar
+// comparando contra su propio snapshot — acá no se guarda ningún "ya avisado".
+function getTicketNotificationsByOrderCodes(orderCodes) {
+  if (!orderCodes.length) return []
+  const placeholders = orderCodes.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT * FROM tickets WHERE order_code IN (${placeholders}) ORDER BY created_at DESC`
+  ).all(...orderCodes)
+  return rows.map(t => ({
+    ...t,
+    pending_credentials: t.pending_credentials ? JSON.parse(t.pending_credentials) : null,
+  }))
+}
+
+// POST /api/integration/tickets/ack-credentials — el portal ya mandó el correo con
+// las credenciales nuevas, se borran para que no se vuelvan a entregar.
+function ackTicketCredentials(ticketId) {
+  db.prepare("UPDATE tickets SET pending_credentials = '' WHERE id = ?").run(ticketId)
 }
 
 function updateTicket(id, data) {
@@ -1047,5 +1168,6 @@ module.exports = {
   countAvailableProfiles, assignProfileForPortal,
   insertIntegrationTicket, getIntegrationTicketsByOrderCodes, getTicketsCountByStatus,
   getTickets, updateTicket,
-  getOrderCurrentProfile, reassignProfileForTicket,
+  getOrderCurrentProfile, reassignProfileForTicket, renewProfileForPortal,
+  getTicketNotificationsByOrderCodes, ackTicketCredentials,
 }

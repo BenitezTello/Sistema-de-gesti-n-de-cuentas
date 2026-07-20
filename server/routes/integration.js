@@ -54,6 +54,36 @@ router.get('/order-status', (req, res) => {
   res.json(result)
 })
 
+// POST /api/integration/renew-profile — consumido por gateway /renovar-suscripcion (PLAN.md Día 5).
+// A diferencia de assign-profile, no reasigna: extiende el vencimiento del MISMO
+// perfil vigente del pedido. El portal ya cobró en Culqi antes de llamar esto.
+router.post('/renew-profile', (req, res) => {
+  const { orderCode } = req.body || {}
+  if (!orderCode) return res.status(400).json({ error: 'DATOS_INCOMPLETOS' })
+
+  const result = db.renewProfileForPortal(orderCode)
+  if (!result) return res.status(404).json({ error: 'PEDIDO_NO_ENCONTRADO' })
+  res.status(200).json(result)
+})
+
+// POST /api/integration/tickets/notifications — consumido por gateway /tickets/notifications
+// (job de polling del portal, PLAN.md Día 5). Body: { orderCodes: [...] } — mismo shape
+// que /tickets/lookup, con pending_credentials incluido cuando hubo una reasignación.
+router.post('/tickets/notifications', (req, res) => {
+  const { orderCodes } = req.body || {}
+  if (!Array.isArray(orderCodes)) return res.status(400).json({ error: 'DATOS_INCOMPLETOS' })
+  res.json({ tickets: db.getTicketNotificationsByOrderCodes(orderCodes) })
+})
+
+// POST /api/integration/tickets/ack-credentials — el portal confirma que ya mandó el
+// correo con las credenciales nuevas de ese ticket; se borran para no reenviarlas.
+router.post('/tickets/ack-credentials', (req, res) => {
+  const { ticketId } = req.body || {}
+  if (!ticketId) return res.status(400).json({ error: 'DATOS_INCOMPLETOS' })
+  db.ackTicketCredentials(ticketId)
+  res.json({ ok: true })
+})
+
 // GET /api/integration/bi-summary — consumido por gateway /bi (Power BI, PLAN.md Día 5).
 router.get('/bi-summary', (_req, res) => {
   res.json({

@@ -16,6 +16,8 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - BOT_API_KEY=${BOT_API_KEY}
       - PORTAL_SERVICE_KEY=${PORTAL_SERVICE_KEY}
+      - PORTAL_NOTIFY_URL=${PORTAL_NOTIFY_URL}
+      - PORTAL_NOTIFY_KEY=${PORTAL_NOTIFY_KEY}
     volumes:
       - db_data:/app/server/data
     depends_on:

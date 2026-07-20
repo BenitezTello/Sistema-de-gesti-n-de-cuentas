@@ -506,14 +506,43 @@ router.post('/tickets/:id/reassign', (req, res) => {
 
   res.json({
     profileId: result.profileId,
+    profileNumber: result.profileNumber,
     accountEmail: result.accountEmail,
     accountPassword: result.accountPassword,
+    profilePin: result.profilePin,
     expiryDate: result.expiryDate,
     platform: result.platform,
   })
 })
 
-router.put('/tickets/:id', (req, res) => {
+// Notifica al portal DIRECTO (sin pasar por portal->gateway->TPS-1) — dispara solo
+// cuando el admin hace click en "Guardar y notificar" en TicketsView.jsx (b.notify).
+// Es la única llamada TPS-1 -> portal de todo el sistema, deliberada y de un solo uso
+// por click, no un webhook automático. El job de polling del portal
+// (server/lib/ticketNotifyJob.js, cada 15 min) sigue como red de seguridad si esto
+// falla — ej. el portal está caído justo en ese instante.
+async function notifyPortal(payload) {
+  const url = process.env.PORTAL_NOTIFY_URL
+  const key = process.env.PORTAL_NOTIFY_KEY
+  if (!url || !key) {
+    console.warn('[notifyPortal] PORTAL_NOTIFY_URL/PORTAL_NOTIFY_KEY no configurados — se omite el aviso inmediato (el job de polling del portal lo recogerá en su próxima corrida)')
+    return { ok: false }
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-TPS1-Notify-Key': key },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5000),
+    })
+    return { ok: res.ok }
+  } catch (err) {
+    console.error('[notifyPortal] error', err.message)
+    return { ok: false }
+  }
+}
+
+router.put('/tickets/:id', async (req, res) => {
   const b = req.body || {}
   const clean = {}
   if (b.status !== undefined) clean.status = TICKET_STATUSES.includes(b.status) ? b.status : 'abierto'
@@ -524,7 +553,27 @@ router.put('/tickets/:id', (req, res) => {
     audit(req, 'UPDATE', 'ticket', req.params.id,
       `Actualizó ticket "${ticket.subject}" de ${ticket.client_name || ticket.order_code} → ${ticket.status}`)
   }
-  res.json({ ok: true })
+
+  let notified = false
+  if (ticket && b.notify) {
+    const credentials = ticket.pending_credentials ? JSON.parse(ticket.pending_credentials) : null
+    const result = await notifyPortal({
+      orderCode: ticket.order_code,
+      ticketId: ticket.id,
+      subject: ticket.subject,
+      status: ticket.status,
+      adminResponse: ticket.admin_response,
+      credentials,
+    })
+    if (result.ok) {
+      notified = true
+      // Ya se entregó sincrónicamente — se borra para que el job de polling del portal
+      // no la vuelva a mandar cuando corra su chequeo de rutina.
+      if (credentials) db.ackTicketCredentials(ticket.id)
+    }
+  }
+
+  res.json({ ok: true, notified })
 })
 
 // ── Audit Log (solo admin) ────────────────────────────────────────────

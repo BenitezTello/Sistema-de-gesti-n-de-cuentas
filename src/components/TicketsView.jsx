@@ -39,9 +39,11 @@ export default function TicketsView() {
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('')
   const [drafts, setDrafts] = useState({})
+  const [draftStatus, setDraftStatus] = useState({})
   const [savingId, setSavingId] = useState(null)
   const [reassigningId, setReassigningId] = useState(null)
   const [reassignResults, setReassignResults] = useState({})
+  const [notifiedId, setNotifiedId] = useState(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -62,7 +64,7 @@ export default function TicketsView() {
     setSavingId(id)
     setError(null)
     try {
-      await apiFetch(`/tickets/${id}`, 'PUT', patch)
+      const result = await apiFetch(`/tickets/${id}`, 'PUT', patch)
       setRows((prev) =>
         prev.map((r) => {
           if (r.id !== id) return r
@@ -71,11 +73,23 @@ export default function TicketsView() {
           return next
         })
       )
+      return result
     } catch (err) {
       setError(err.message)
+      return null
     } finally {
       setSavingId(null)
     }
+  }
+
+  // Guarda estado/respuesta Y avisa al cliente por correo de inmediato (Día 5) — TPS-1
+  // le pega directo al portal (única excepción a "portal -> gateway -> TPS-1"), en vez
+  // de esperar al job de polling de 15 min. Si el portal está caído justo en ese
+  // momento, el job de todas formas lo recoge después, así que no se pierde el aviso.
+  async function saveAndNotify(id, status, adminResponse) {
+    const result = await updateTicket(id, { status, adminResponse, notify: true })
+    setNotifiedId(result?.notified ? id : null)
+    if (result?.notified) setTimeout(() => setNotifiedId((cur) => (cur === id ? null : cur)), 3000)
   }
 
   // Reasigna a otra cuenta/perfil de la misma plataforma (la cuenta vieja tenía
@@ -140,10 +154,14 @@ export default function TicketsView() {
             key={t.id}
             ticket={t}
             draft={drafts[t.id] ?? t.admin_response ?? ''}
+            draftStatus={draftStatus[t.id] ?? t.status}
             onDraftChange={(v) => setDrafts((d) => ({ ...d, [t.id]: v }))}
-            onStatusChange={(status) => updateTicket(t.id, { status })}
-            onSaveResponse={() => updateTicket(t.id, { adminResponse: drafts[t.id] ?? t.admin_response ?? '' })}
+            onStatusDraftChange={(status) => setDraftStatus((d) => ({ ...d, [t.id]: status }))}
+            onSaveAndNotify={() =>
+              saveAndNotify(t.id, draftStatus[t.id] ?? t.status, drafts[t.id] ?? t.admin_response ?? '')
+            }
             saving={savingId === t.id}
+            notified={notifiedId === t.id}
             onReassign={() => reassignTicket(t.id)}
             reassigning={reassigningId === t.id}
             reassignResult={reassignResults[t.id]}
@@ -173,13 +191,16 @@ function whatsappLink(phone, ticket) {
   return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`
 }
 
-function TicketRow({ ticket, draft, onDraftChange, onStatusChange, onSaveResponse, saving, onReassign, reassigning, reassignResult }) {
+function TicketRow({
+  ticket, draft, draftStatus, onDraftChange, onStatusDraftChange, onSaveAndNotify,
+  saving, notified, onReassign, reassigning, reassignResult,
+}) {
   const cfg = STATUS_CFG[ticket.status] || STATUS_CFG.abierto
   const [copied, setCopied] = useState(false)
 
   function copyCreds() {
     if (!reassignResult) return
-    const text = `Usuario: ${reassignResult.accountEmail}\nContraseña: ${reassignResult.accountPassword}\nVence: ${reassignResult.expiryDate}`
+    const text = `Usuario: ${reassignResult.accountEmail}\nContraseña: ${reassignResult.accountPassword}\nPerfil: #${reassignResult.profileNumber}\nPIN: ${reassignResult.profilePin}\nVence: ${reassignResult.expiryDate}`
     navigator.clipboard?.writeText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -218,10 +239,11 @@ function TicketRow({ ticket, draft, onDraftChange, onStatusChange, onSaveRespons
             </a>
           )}
           <select
-            value={ticket.status}
-            onChange={(e) => onStatusChange(e.target.value)}
+            value={draftStatus}
+            onChange={(e) => onStatusDraftChange(e.target.value)}
             disabled={saving}
             className="form-select text-xs"
+            title="Se guarda recién al hacer click en 'Guardar y notificar'"
           >
             {STATUS_OPTIONS.map((s) => (
               <option key={s} value={s}>
@@ -242,8 +264,13 @@ function TicketRow({ ticket, draft, onDraftChange, onStatusChange, onSaveRespons
           rows={2}
           className="form-input flex-1 text-xs"
         />
-        <button onClick={onSaveResponse} disabled={saving} className="btn-primary flex items-center gap-1.5 text-xs">
-          <Send size={13} /> Guardar
+        <button
+          onClick={onSaveAndNotify}
+          disabled={saving}
+          className="btn-primary flex items-center gap-1.5 text-xs"
+          title="Guarda el estado y la respuesta, y le manda un correo al cliente ahora mismo (con las credenciales nuevas si reasignaste la cuenta)"
+        >
+          <Send size={13} className={saving ? 'animate-pulse' : ''} /> {notified ? '¡Notificado!' : 'Guardar y notificar'}
         </button>
         <button
           onClick={onReassign}
@@ -265,6 +292,7 @@ function TicketRow({ ticket, draft, onDraftChange, onStatusChange, onSaveRespons
           </div>
           <p className="mt-1">Usuario: {reassignResult.accountEmail}</p>
           <p>Contraseña: {reassignResult.accountPassword}</p>
+          <p>Perfil: #{reassignResult.profileNumber} · PIN: {reassignResult.profilePin}</p>
           <p>Vence: {reassignResult.expiryDate}</p>
         </div>
       )}

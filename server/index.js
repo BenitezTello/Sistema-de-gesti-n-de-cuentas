@@ -97,6 +97,9 @@ app.use('/api/wa', authMiddleware, (req, res) => {
   }
 })
 
+// ── Ruta /api/* no encontrada: responder 404 en vez de dejar la conexión colgada ──
+app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta no encontrada' }))
+
 // ── En producción: servir el build de React ───────────────────────────
 const DIST = path.join(__dirname, '..', 'dist')
 if (process.env.NODE_ENV === 'production') {
